@@ -1,0 +1,72 @@
+{% extends "layout.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+
+<h1>Projects</h1>
+
+<div class="section">
+  <h2>All Projects</h2>
+  {% if projects %}
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Status</th>
+        <th>Progress</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr>
+        <td><a href="/projects/{{ p.id }}">{{ p.title }}</a></td>
+        <td><span class="badge {{ p.status }}">{{ p.status }}</span></td>
+        <td>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 80px; height: 4px; background: var(--border); border-radius: 2px;">
+              <div style="width: {{ p.progress }}%; height: 100%; background: var(--accent); border-radius: 2px;"></div>
+            </div>
+            <span style="color: var(--muted); font-size: 12px;">{{ p.progress }}%</span>
+          </div>
+        </td>
+        <td style="color: var(--muted);">{{ p.description or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No projects yet.</p>
+  {% endif %}
+</div>
+
+<div class="section">
+  <h2>New Project</h2>
+  <div class="card">
+    <form action="/projects" method="POST">
+      <div class="row">
+        <div class="field" style="flex: 2">
+          <label>Title *</label>
+          <input type="text" name="title" required>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <select name="status">
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+            <option value="archived">Archived</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea name="description" rows="2"></textarea>
+      </div>
+      <div>
+        <button type="submit">Create Project</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,39 @@
+# python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# database
+*.db
+*.sqlite3
+
+# env
+.env
+*.env
+.env.*
+
+# logs
+*.log
+
+# mac
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

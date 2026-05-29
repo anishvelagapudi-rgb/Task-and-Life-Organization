@@ -1,0 +1,93 @@
+{% extends "layout.html" %}
+{% block title %}{{ task.title }}{% endblock %}
+{% block content %}
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+  <h1 style="margin-bottom: 0;">{{ task.title }}</h1>
+  <div class="actions">
+    <span class="badge {{ task.status }}">{{ task.status }}</span>
+    <span class="badge {{ task.priority }}">{{ task.priority }}</span>
+    <a href="/tasks" class="btn btn-ghost">← Back</a>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Edit</h2>
+  <div class="card">
+    <form action="/tasks/{{ task.id }}" method="POST">
+      <div class="field">
+        <label>Title *</label>
+        <input type="text" name="title" value="{{ task.title }}" required>
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea name="description" rows="3">{{ task.description or '' }}</textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Status</label>
+          <select name="status">
+            {% for s in ['inbox','active','blocked','done','archived'] %}
+            <option value="{{ s }}" {% if task.status == s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Priority</label>
+          <select name="priority">
+            {% for p in ['low','medium','high','critical'] %}
+            <option value="{{ p }}" {% if task.priority == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Energy Type</label>
+          <select name="energy_type">
+            <option value="">—</option>
+            {% for e in ['deep_focus','light_admin','creative','social','low_energy'] %}
+            <option value="{{ e }}" {% if task.energy_type == e %}selected{% endif %}>{{ e }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Project</label>
+          <select name="project_id">
+            <option value="">—</option>
+            {% for p in projects %}
+            <option value="{{ p.id }}" {% if task.project_id == p.id %}selected{% endif %}>{{ p.title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Due Date</label>
+          <input type="date" name="due_date" value="{{ task.due_date or '' }}">
+        </div>
+        <div class="field">
+          <label>Effort (min)</label>
+          <input type="number" name="estimated_effort" value="{{ task.estimated_effort or '' }}" min="1">
+        </div>
+        <div class="field">
+          <label>Fear (1–10)</label>
+          <input type="number" name="fear_level" value="{{ task.fear_level or '' }}" min="1" max="10">
+        </div>
+        <div class="field">
+          <label>Ambiguity (1–10)</label>
+          <input type="number" name="ambiguity_level" value="{{ task.ambiguity_level or '' }}" min="1" max="10">
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">Save</button>
+        <a href="/tasks/{{ task.id }}/delete" class="btn btn-danger"
+           onclick="return confirm('Delete this task?')">Delete</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="section" style="color: var(--muted); font-size: 12px;">
+  Created {{ task.created_at }} · Updated {{ task.updated_at }}
+</div>
+
+{% endblock %}

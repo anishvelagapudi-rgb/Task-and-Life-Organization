@@ -1,0 +1,726 @@
+You are designing and scaffolding a deeply personalized “Personal Execution OS” for ONE user only.
+
+This is NOT a SaaS app.
+This is NOT a scalable startup platform.
+This is NOT a generic productivity app.
+
+This is a highly personalized cognitive infrastructure system combining:
+- structured task management
+- adaptive execution planning
+- AI-assisted reasoning
+- Obsidian knowledge management
+- external calendar ingestion
+- psychological task modeling
+
+The system is intentionally optimized for:
+- a single authenticated user
+- deep personalization
+- agentic AI workflows
+- long-term contextual memory
+- low-friction execution
+- rapid iteration over scalability
+
+====================================================
+CORE PRODUCT VISION
+====================================================
+
+The app exists to solve the user’s actual behavioral problems:
+
+- deadline dependency
+- fear-based procrastination
+- avoidance of ambiguous tasks
+- chaotic mental tracking
+- reliance on bursts of focus
+- lack of operational structure
+- cognitive overload
+
+The system should:
+- centralize obligations
+- reduce ambiguity
+- create controlled urgency
+- recommend optimal next actions
+- preserve freedom/flexibility
+- integrate deeply with notes/context
+- act like an intelligent execution assistant
+
+The system should NOT:
+- force rigid scheduling
+- become corporate/task-manager sludge
+- optimize for multi-user scalability
+- require heavy manual organization
+- feel like productivity theater
+
+====================================================
+FINAL ARCHITECTURE
+====================================================
+
+The system consists of THREE major layers:
+
+1. Operational Layer
+   Flask + MySQL
+   Stores structured execution state.
+
+2. Cognitive Layer
+   Obsidian Vault
+   Stores notes, thoughts, documents, project context, AI memory.
+
+3. Intelligence Layer
+   AI services that bridge operational state + vault context.
+
+====================================================
+HIGH LEVEL SYSTEM DIAGRAM
+====================================================
+
+                    ┌─────────────────────┐
+                    │     Frontend UI     │
+                    │ Dashboard / Tasks   │
+                    └─────────┬───────────┘
+                              │
+                           REST API
+                              │
+                    ┌─────────▼───────────┐
+                    │    Flask Backend    │
+                    │ Core Application    │
+                    └─────────┬───────────┘
+                              │
+        ┌─────────────────────┼──────────────────────┐
+        │                     │                      │
+        ▼                     ▼                      ▼
+┌───────────────┐   ┌─────────────────┐   ┌────────────────┐
+│ MySQL DB      │   │ Obsidian Vault │   │ AI Services     │
+│ Tasks/Projects│   │ Markdown Notes │   │ Recommendations │
+└───────────────┘   └─────────────────┘   └────────────────┘
+
+====================================================
+AUTHENTICATION REQUIREMENTS
+====================================================
+
+This app is single-user internally but must still have secure authentication.
+
+Implement:
+- Google OAuth 2.0
+- session-based auth
+- protected routes
+
+DO NOT implement:
+- registration
+- onboarding
+- teams
+- organizations
+- RBAC
+- collaboration
+
+Authentication logic:
+
+1. User logs in via Google OAuth
+2. Backend verifies email
+3. Backend checks if email matches allowed owner email
+4. If valid:
+   - create session
+   - grant access
+5. Otherwise deny access
+
+This is a private system.
+
+====================================================
+DATABASE REQUIREMENTS
+====================================================
+
+Use:
+- MySQL
+- SQLAlchemy ORM
+- Flask-Migrate / Alembic
+
+DO NOT optimize for horizontal scalability.
+
+====================================================
+CORE DATABASE DESIGN
+====================================================
+
+The database stores STRUCTURED EXECUTION STATE ONLY.
+
+It is NOT the knowledge system.
+
+====================================================
+CORE TABLES
+====================================================
+
+1. tasks
+
+Fields:
+
+id
+title
+description
+
+status
+priority
+
+due_date
+completed_at
+
+estimated_effort
+complexity
+
+energy_type
+fear_level
+ambiguity_level
+
+urgency_score
+resistance_score
+momentum_score
+
+execution_mode
+context_type
+
+project_id
+parent_task_id
+
+source_type
+external_reference_id
+
+ai_generated
+
+created_at
+updated_at
+archived
+
+----------------------------------------------------
+
+2. projects
+
+Fields:
+
+id
+name
+description
+goal
+
+status
+progress
+risk_level
+
+created_at
+updated_at
+target_date
+
+----------------------------------------------------
+
+3. subtasks
+
+Fields:
+
+id
+task_id
+title
+status
+order_index
+
+----------------------------------------------------
+
+4. tags
+
+Fields:
+
+id
+name
+color
+
+----------------------------------------------------
+
+5. task_tags
+
+Fields:
+
+task_id
+tag_id
+
+----------------------------------------------------
+
+6. task_dependencies
+
+Fields:
+
+id
+task_id
+depends_on_task_id
+
+====================================================
+EXTERNAL IMPORT SYSTEM
+====================================================
+
+The system must support:
+- Google Calendar import
+- ICS feed import
+- Canvas calendar ingestion via ICS
+
+External data is NEVER directly treated as canonical state.
+
+Use a normalization pipeline.
+
+====================================================
+IMPORT ARCHITECTURE
+====================================================
+
+External Source
+    ↓
+Fetcher
+    ↓
+Parser
+    ↓
+Raw External Object
+    ↓
+Normalizer
+    ↓
+Internal Task / Constraint / Event
+
+====================================================
+IMPORT TABLES
+====================================================
+
+1. external_sources
+
+Fields:
+
+id
+source_type
+name
+
+config_json
+
+sync_token
+last_synced
+
+status
+created_at
+
+----------------------------------------------------
+
+2. external_objects
+
+Fields:
+
+id
+source_id
+
+external_id
+object_type
+
+raw_payload_json
+checksum
+
+created_at
+updated_at
+last_seen
+
+----------------------------------------------------
+
+3. normalization_links
+
+Fields:
+
+id
+external_object_id
+internal_task_id
+mapping_type
+
+====================================================
+TASK PHILOSOPHY
+====================================================
+
+Tasks are NOT simple todos.
+
+Tasks are psychologically-aware execution objects.
+
+They should support:
+- urgency
+- resistance
+- ambiguity
+- momentum
+- energy matching
+- dependency relationships
+
+====================================================
+ENERGY TYPES
+====================================================
+
+Tasks should support:
+
+- deep_focus
+- light_admin
+- social
+- creative
+- low_energy
+
+Purpose:
+adaptive task recommendation based on current mental state.
+
+====================================================
+TASK ENGINE
+====================================================
+
+The system should NOT rigidly time-block.
+
+Instead:
+recommend optimal next actions.
+
+The engine should consider:
+- due date proximity
+- estimated effort
+- task fear level
+- ambiguity
+- current energy
+- available time
+- dependency chains
+- ignored duration
+- momentum opportunities
+
+====================================================
+RECOMMENDATION MODEL
+====================================================
+
+Conceptual formula:
+
+(actionability)
++
+(urgency)
++
+(momentum_gain)
+-
+(resistance)
+
+====================================================
+DATA STRUCTURES
+====================================================
+
+Use actual CS concepts where useful.
+
+1. Inbox Queue
+FIFO queue for raw capture.
+
+2. Priority Queue
+Heap-based recommendation engine.
+
+3. Context Stack
+Tracks interrupted tasks/focus sessions.
+
+4. Dependency Graph
+Tracks project/task relationships.
+
+====================================================
+OBSIDIAN INTEGRATION
+====================================================
+
+THIS IS A CORE PART OF THE SYSTEM.
+
+The Obsidian vault is the KNOWLEDGE + CONTEXT layer.
+
+It stores:
+- notes
+- brainstorming
+- project planning
+- journals
+- long-form writing
+- reflections
+- AI memory context
+- technical learning
+- supporting documents
+
+The vault is NOT:
+- the canonical task system
+
+====================================================
+VAULT ARCHITECTURE
+====================================================
+
+The vault exists on the server filesystem.
+
+Example:
+
+/data/vault/
+
+Backend services can:
+- read notes
+- write notes
+- scan vault
+- link notes to tasks/projects
+- use notes as AI context
+
+The user accesses the same vault through Obsidian.
+
+====================================================
+TASK ↔ NOTE LINKING
+====================================================
+
+Create relational linking between tasks and markdown notes.
+
+Table:
+
+task_notes
+
+Fields:
+
+task_id
+note_path
+relationship_type
+
+Examples:
+- supporting_context
+- brainstorm
+- meeting_notes
+- reference_material
+
+====================================================
+MARKDOWN METADATA
+====================================================
+
+Support frontmatter like:
+
+type: project_note
+related_project: transfer_system
+related_tasks:
+  - 42
+tags:
+  - transfer
+  - planning
+
+====================================================
+AI SYSTEM ARCHITECTURE
+====================================================
+
+AI is one of the MOST IMPORTANT PARTS of the system.
+
+AI should:
+- reduce ambiguity
+- break down tasks
+- summarize notes
+- recommend actions
+- connect notes/tasks/projects
+- assist planning
+- surface context
+- act as a cognitive copilot
+
+====================================================
+LLM PROVIDER REQUIREMENTS
+====================================================
+
+Use GROQ API for all initial AI integrations.
+
+Requirements:
+- abstract provider logic behind service layer
+- never hardcode provider logic into routes
+- support easy provider swapping later
+
+Use environment variables for:
+- GROQ_API_KEY
+
+Design the AI layer so models can later be swapped for:
+- OpenAI
+- local models
+- Anthropic
+- Ollama
+- other providers
+
+without major architecture rewrites.
+
+====================================================
+VERY IMPORTANT AI REQUIREMENT
+====================================================
+
+DO NOT tightly couple AI logic to Flask routes.
+
+Create:
+
+/services/ai/
+
+All AI orchestration lives there.
+
+====================================================
+FUTURE AI CAPABILITIES
+====================================================
+
+Design architecture to support:
+
+- task decomposition
+- recommendation generation
+- semantic vault search
+- embeddings
+- long-term memory
+- contextual planning
+- autonomous workflows
+- agentic behavior
+
+====================================================
+FRONTEND REQUIREMENTS
+====================================================
+
+Frontend philosophy:
+- calm
+- information dense
+- minimal friction
+- fast interactions
+- keyboard-friendly
+
+NOT:
+- productivity influencer aesthetics
+- Notion clone behavior
+- enterprise SaaS UI
+
+====================================================
+CORE FRONTEND VIEWS
+====================================================
+
+1. Dashboard
+Shows:
+- urgent tasks
+- recommended actions
+- active projects
+- pressure indicators
+- momentum indicators
+
+----------------------------------------------------
+
+2. Task View
+Supports:
+- filtering
+- chunking
+- subtasks
+- energy filtering
+- dependency viewing
+
+----------------------------------------------------
+
+3. Project View
+Shows:
+- goals
+- risks
+- progress
+- next actions
+- related notes
+
+----------------------------------------------------
+
+4. Inbox View
+Ultra-fast capture interface.
+
+====================================================
+API DESIGN
+====================================================
+
+Design RESTful APIs.
+
+====================================================
+AUTH APIs
+====================================================
+
+POST /auth/login
+GET  /auth/callback
+POST /auth/logout
+GET  /auth/me
+
+====================================================
+TASK APIs
+====================================================
+
+GET    /tasks
+POST   /tasks
+GET    /tasks/:id
+PATCH  /tasks/:id
+DELETE /tasks/:id
+
+====================================================
+PROJECT APIs
+====================================================
+
+GET    /projects
+POST   /projects
+GET    /projects/:id
+PATCH  /projects/:id
+
+====================================================
+IMPORT APIs
+====================================================
+
+POST /imports/google/connect
+POST /imports/google/sync
+
+POST /imports/ics
+
+GET  /imports/status
+
+====================================================
+RECOMMENDATION APIs
+====================================================
+
+GET /recommendations/now
+GET /recommendations/deep-focus
+GET /recommendations/low-energy
+
+====================================================
+DEPLOYMENT REQUIREMENTS
+====================================================
+
+Deploy on Render initially.
+
+Use:
+- Flask
+- Gunicorn
+- MySQL
+
+Keep deployment simple.
+
+====================================================
+IMPORTANT ENGINEERING PHILOSOPHY
+====================================================
+
+This system should prioritize:
+- low friction
+- psychological usefulness
+- operational clarity
+- architectural cleanliness
+
+OVER:
+- scalability
+- startup readiness
+- enterprise abstractions
+
+====================================================
+VERY IMPORTANT PRODUCT PRINCIPLE
+====================================================
+
+The app succeeds ONLY if:
+- adding a task takes seconds
+- recommendations feel useful
+- context retrieval is seamless
+- dashboard instantly answers:
+  “what should I do right now?”
+
+Everything else is secondary.
+
+====================================================
+OUTPUT REQUIREMENTS
+====================================================
+
+Generate:
+
+1. Full system architecture
+2. Recommended folder structure
+3. Backend architecture
+4. Flask blueprint structure
+5. Database schema
+6. SQLAlchemy model design
+7. Obsidian integration design
+8. AI service architecture
+9. Import pipeline design
+10. Recommendation engine design
+11. API design
+12. Frontend architecture
+13. Deployment strategy
+14. MVP implementation order
+15. Future extensibility plan
+16. Technical debt warnings
+17. Suggested development roadmap
+
+Think deeply.
+Do not produce generic boilerplate.
+Act like a senior systems architect designing a personalized cognitive operating system.

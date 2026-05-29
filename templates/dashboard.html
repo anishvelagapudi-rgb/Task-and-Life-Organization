@@ -1,0 +1,93 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<h1>Dashboard</h1>
+
+<div class="section">
+  <h2>Active &amp; Inbox</h2>
+  {% if active_tasks %}
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Priority</th>
+        <th>Energy</th>
+        <th>Due</th>
+        <th>Project</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for task in active_tasks %}
+      <tr>
+        <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
+        <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
+        <td><span class="badge">{{ task.energy_type or '—' }}</span></td>
+        <td>{{ task.due_date or '—' }}</td>
+        <td>{{ task.project_title or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No active tasks.</p>
+  {% endif %}
+</div>
+
+<div class="section">
+  <h2>Projects</h2>
+  {% if projects %}
+  <div>
+    {% for p in projects %}
+    <div class="card" style="display: flex; justify-content: space-between; align-items: center;">
+      <div>
+        <a href="/projects/{{ p.id }}" style="font-weight: 500; color: var(--text);">{{ p.title }}</a>
+        {% if p.description %}<span style="color: var(--muted); margin-left: 12px; font-size: 13px;">{{ p.description }}</span>{% endif %}
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <span class="badge {{ p.status }}">{{ p.status }}</span>
+        <span style="color: var(--muted); font-size: 12px;">{{ p.progress }}%</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No projects yet. <a href="/projects">Create one.</a></p>
+  {% endif %}
+</div>
+
+<div class="section">
+  <h2>Quick Capture</h2>
+  <div class="card">
+    <form action="/tasks" method="POST">
+      <div class="row">
+        <div class="field" style="flex: 3">
+          <input type="text" name="title" placeholder="What needs to get done?" required>
+        </div>
+        <div class="field">
+          <select name="priority">
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div class="field">
+          <select name="energy_type">
+            <option value="">Any energy</option>
+            <option value="deep_focus">Deep Focus</option>
+            <option value="light_admin">Light Admin</option>
+            <option value="creative">Creative</option>
+            <option value="social">Social</option>
+            <option value="low_energy">Low Energy</option>
+          </select>
+        </div>
+        <div>
+          <button type="submit">Add</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
