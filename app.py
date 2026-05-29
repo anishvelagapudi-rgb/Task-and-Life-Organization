@@ -109,7 +109,7 @@ def update_task(task_id):
         project_id=data.get("project_id") or None,
     )
     task.db_push(db)
-    return redirect(url_for("get_task", task_id=task_id))
+    return redirect("/tasks")
 
 
 @app.route("/tasks/<int:task_id>/delete")
@@ -173,7 +173,7 @@ def update_project(project_id):
         progress=int(data.get("progress", 0)),
     )
     project.db_push(db)
-    return redirect(url_for("get_project", project_id=project_id))
+    return redirect("/projects")
 
 
 @app.route("/projects/<int:project_id>/delete")
