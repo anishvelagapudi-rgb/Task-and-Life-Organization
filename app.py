@@ -2,8 +2,12 @@ from flask import Flask, render_template, request, redirect, url_for
 from db import get_db, init_db
 from classes.Task import Task
 from classes.Project import Project
+from api import api_bp
 
 app = Flask(__name__)
+
+# Register the API blueprint — wires in all /api/* routes from api.py
+app.register_blueprint(api_bp)
 
 
 def check_login():
