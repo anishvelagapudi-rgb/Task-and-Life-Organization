@@ -1,0 +1,25 @@
+REST API Endpoints
+
+TASKS
+GET    /api/tasks           List tasks — filterable by status, priority, project_id   [N8N, AI]
+GET    /api/tasks/<id>      Get a single task by id                                    [AI]
+POST   /api/tasks           Create or update a task                                    [N8N, AI]
+                            no id → create new | id present → update matched fields, ignore invalid/missing
+DELETE /api/tasks/<id>      Delete a task                                              [AI]
+
+PROJECTS
+GET    /api/projects        List projects — filterable by status                       [N8N, AI]
+GET    /api/projects/<id>   Get a single project by id                                 [AI]
+POST   /api/projects        Create or update a project                                 [N8N, AI]
+                            no id → create new | id present → update matched fields, ignore invalid/missing
+DELETE /api/projects/<id>   Delete a project                                           [AI]
+
+INGESTION
+POST   /api/ingest          Receive raw content from N8N, chunk + embed it             [N8N]
+
+AI CHAT
+POST   /api/chat            Send a message, run agentic loop, return response          [Browser]
+GET    /api/chat/history    Retrieve past conversation turns                           [Browser]
+
+HEALTH
+GET    /api/health          Liveness check — returns 200 OK                            [N8N, AWS]
