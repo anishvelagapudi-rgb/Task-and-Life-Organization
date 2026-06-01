@@ -7,16 +7,20 @@
 
 const BASE = "http://localhost:5000";
 
+// Paste your actual API key here before running.
+const API_KEY = "R!<%R19%)v!4*Es4Dn_7`@CP|r[.%X|xQI(Po@I{zC)7'-ZR";
+
 // ─── helper ───────────────────────────────────────────────────────────────────
 
 // expectedStatus lets you declare what HTTP status code a test should return.
 // If omitted, the test passes on any 2xx. Use it for tests that expect errors
 // (400, 404, etc.) so they show ✓ instead of ✗.
-async function hit(label, method, path, body = null, expectedStatus = null) {
-  const options = {
-    method,
-    headers: { "Content-Type": "application/json" },
-  };
+// Pass apiKey=null to deliberately omit the Authorization header.
+async function hit(label, method, path, body = null, expectedStatus = null, apiKey = API_KEY) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+  const options = { method, headers };
   if (body) options.body = JSON.stringify(body);
 
   const res = await fetch(`${BASE}${path}`, options);
@@ -35,6 +39,18 @@ async function hit(label, method, path, body = null, expectedStatus = null) {
 async function main() {
   console.log("=== API Test Suite ===");
   console.log(`Target: ${BASE}\n`);
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+
+  // No Authorization header at all — should be rejected
+  await hit("No auth header (expect 401)", "GET", "/api/health", null, 401, null);
+
+  // Wrong key — should be rejected
+  await hit("Wrong API key (expect 401)", "GET", "/api/health", null, 401, "totally-wrong-key");
+
+  // Valid key — should pass through
+  await hit("Valid API key (expect 200)", "GET", "/api/health", null, 200);
+
 
   // ── Health ────────────────────────────────────────────────────────────────
   await hit("Health check", "GET", "/api/health");

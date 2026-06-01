@@ -1,14 +1,14 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db
 from classes.Task import Task
 from classes.Project import Project
 from api import api_bp
 from authlib.integrations.flask_client import OAuth
-from dotenv import load_dotenv
 import uuid
 import os
-
-load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ['FLASK_SECRET_KEY']

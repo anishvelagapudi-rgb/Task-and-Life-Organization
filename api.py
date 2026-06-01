@@ -1,11 +1,26 @@
 from flask import Blueprint, jsonify, request
 from db import get_db
 from datetime import datetime, timezone
+import hashlib
+import hmac
+import os
 
 # Blueprint groups all routes in this file under the "/api" prefix.
 # So @api_bp.route("/tasks") → GET /api/tasks, etc.
 # app.py registers this via app.register_blueprint(api_bp).
 api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+API_KEY_HASH = os.environ.get("API_KEY_HASH", "")
+
+
+@api_bp.before_request
+def require_api_key():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized"}), 401
+    incoming_hash = hashlib.sha512(auth[len("Bearer "):].encode()).hexdigest()
+    if not hmac.compare_digest(incoming_hash, API_KEY_HASH):
+        return jsonify({"error": "Unauthorized"}), 401
 
 # Whitelists of fields that are allowed to be set via the API.
 # Prevents callers from accidentally overwriting id, created_at, etc.
