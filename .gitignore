@@ -14,9 +14,13 @@ __pycache__/
 .env
 *.env
 .env.*
+!.env.example
 
 # google oauth credentials file
 GOOGLE CREDENTIALS
+
+# generated api key output
+API_output.txt
 
 # logs
 *.log
