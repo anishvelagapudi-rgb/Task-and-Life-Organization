@@ -48,7 +48,10 @@ def init_db(app):
                 source_type      TEXT DEFAULT 'manual',
                 ai_generated     INTEGER DEFAULT 0,
                 created_at       TEXT NOT NULL,
-                updated_at       TEXT NOT NULL
+                updated_at       TEXT NOT NULL,
+                tags             TEXT DEFAULT '[]',
+                dependencies     TEXT DEFAULT '[]',
+                task_notes       TEXT DEFAULT '[]'
             );
         """)
         db.commit()

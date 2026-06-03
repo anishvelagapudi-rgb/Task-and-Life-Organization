@@ -2,14 +2,73 @@
 {% block title %}{{ task.title }}{% endblock %}
 {% block content %}
 
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
-  <h1 style="margin-bottom: 0;">{{ task.title }}</h1>
+<!-- ── header ───────────────────────────────────────────────────────────── -->
+
+<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px;">
+  <div>
+    <!-- breadcrumb: show parent task if this is a subtask -->
+    {% if parent_task %}
+    <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">
+      subtask of <a href="/tasks/{{ parent_task.id }}">{{ parent_task.title }}</a>
+    </div>
+    {% endif %}
+    <h1 style="margin:0;">{{ task.title }}</h1>
+  </div>
   <div class="actions">
     <span class="badge {{ task.status }}">{{ task.status }}</span>
     <span class="badge {{ task.priority }}">{{ task.priority }}</span>
     <a href="/tasks" class="btn btn-ghost">← Back</a>
   </div>
 </div>
+
+<!-- ── subtask tree ──────────────────────────────────────────────────────── -->
+
+<div class="section">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+    <h2 style="margin:0;">Subtasks</h2>
+    <!-- only show the toggle when there is a root ancestor above this task -->
+    {% if root_id != task.id %}
+    <div style="display:flex; gap:6px;">
+      <button id="btn-subtree" class="btn-sm btn-active">From here ↓</button>
+      <button id="btn-fulltree" class="btn-ghost btn-sm">Full tree ↑↓</button>
+    </div>
+    {% endif %}
+  </div>
+  <div class="card" style="padding:0;">
+    <div id="tree-container"></div>
+  </div>
+</div>
+
+<!-- ── dependencies ─────────────────────────────────────────────────────── -->
+
+{% if dep_tasks %}
+<div class="section">
+  <h2>Depends On</h2>
+  {% for dep in dep_tasks %}
+  <div class="card" style="padding:10px 16px; display:flex; align-items:center; gap:10px;">
+    <a href="/tasks/{{ dep.id }}">{{ dep.title }}</a>
+    <span class="badge {{ dep.status }}">{{ dep.status }}</span>
+    <span class="badge {{ dep.priority }}">{{ dep.priority }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- ── vault notes ──────────────────────────────────────────────────────── -->
+
+{% if task.task_notes %}
+<div class="section">
+  <h2>Notes</h2>
+  {% for note in task.task_notes %}
+  <div class="card" style="padding:10px 16px; display:flex; align-items:center; gap:10px;">
+    <span style="font-family:monospace; font-size:12px; color:var(--accent);">{{ note.note_path }}</span>
+    <span class="badge">{{ note.relationship_type }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- ── edit form ─────────────────────────────────────────────────────────── -->
 
 <div class="section">
   <h2>Edit</h2>
@@ -77,8 +136,40 @@
           <input type="number" name="ambiguity_level" value="{{ task.ambiguity_level or '' }}" min="1" max="10">
         </div>
       </div>
+      <div class="row">
+        <!-- parent task sets this task as a child of another — NULL means root-level -->
+        <div class="field">
+          <label>Parent Task</label>
+          <select name="parent_task_id">
+            <option value="">— none (root) —</option>
+            {% for t in other_tasks %}
+            <option value="{{ t.id }}" {% if task.parent_task_id == t.id %}selected{% endif %}>
+              {{ t.title }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <!-- tags stored as a JSON list; edited here as plain comma-separated text -->
+        <div class="field">
+          <label>Tags (comma-separated)</label>
+          <input type="text" name="tags" value="{{ task.tags | join(', ') if task.tags else '' }}"
+                 placeholder="e.g. coding, research">
+        </div>
+      </div>
       <div class="actions">
         <button type="submit">Save</button>
+        <!-- separate form so this POST isn't tied to the edit fields -->
+        <form action="/tasks/{{ task.id }}/complete" method="POST" style="display:inline;">
+          {% if task.status == 'done' %}
+          <button type="submit" style="background:transparent; border:1px solid var(--warn); color:var(--warn);">
+            ↩ Revert
+          </button>
+          {% else %}
+          <button type="submit" style="background:transparent; border:1px solid var(--success); color:var(--success);">
+            ✓ Complete
+          </button>
+          {% endif %}
+        </form>
         <a href="/tasks/{{ task.id }}/delete" class="btn btn-danger"
            onclick="return confirm('Delete this task?')">Delete</a>
       </div>
@@ -86,8 +177,127 @@
   </div>
 </div>
 
-<div class="section" style="color: var(--muted); font-size: 12px;">
+<!-- ── metadata ─────────────────────────────────────────────────────────── -->
+
+<div class="section" style="color:var(--muted); font-size:12px;">
   Created {{ task.created_at }} · Updated {{ task.updated_at }}
 </div>
+
+<!-- ── tree rendering (client-side) ─────────────────────────────────────── -->
+
+<script>
+// ALL_TASKS is a flat array of every task, each with:
+//   { id, title, status, priority, parent_task_id }
+// parent_task_id === null means the task is a root-level task.
+// The browser uses this to build the tree — the server never constructs one.
+const ALL_TASKS  = {{ all_tasks_json | safe }};
+const CURRENT_ID = {{ task.id }};   // the task this page is showing
+const ROOT_ID    = {{ root_id }};   // topmost ancestor of CURRENT_ID
+
+// ── build lookup maps from the flat list ────────────────────────────────
+
+// taskById[id] → task object  (O(1) lookup by id)
+const taskById = {};
+// childrenOf[parent_id] → array of child task objects
+const childrenOf = {};
+
+ALL_TASKS.forEach(t => {
+  taskById[t.id] = t;
+
+  // tasks with no parent use null as the key — those are root-level tasks
+  const pid = t.parent_task_id ?? null;
+  if (!childrenOf[pid]) childrenOf[pid] = [];
+  childrenOf[pid].push(t);
+});
+
+// ── html helpers ────────────────────────────────────────────────────────
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// ── recursive tree renderer ─────────────────────────────────────────────
+
+// Renders one node and all its descendants into an HTML string.
+// visited prevents infinite loops if parent_task_id ever forms a cycle.
+function renderNode(t, depth, visited) {
+  if (visited.has(t.id)) return '';
+  visited.add(t.id);
+
+  const isCurrent = t.id === CURRENT_ID;
+  const indent    = 8 + depth * 20;
+
+  let html = `<div class="tree-row${isCurrent ? ' tree-current' : ''}" style="padding-left:${indent}px">`;
+
+  // connector arrow for every level below the root
+  if (depth > 0) html += '<span class="tree-connector">└─ </span>';
+
+  // highlight the current page's task; everything else is a clickable link
+  if (isCurrent) {
+    html += `<strong style="color:var(--accent)">▸ ${escHtml(t.title)}</strong>`;
+  } else {
+    html += `<a href="/tasks/${t.id}">${escHtml(t.title)}</a>`;
+  }
+
+  html += ` <span class="badge ${t.status}">${t.status}</span>`;
+  html += ` <span class="badge ${t.priority}">${t.priority}</span>`;
+  html += '</div>';
+
+  // recurse into children
+  const children = childrenOf[t.id] || [];
+  for (const child of children) {
+    html += renderNode(child, depth + 1, visited);
+  }
+
+  return html;
+}
+
+// ── two tree views ───────────────────────────────────────────────────────
+
+// "From here" — shows only the subtree rooted at CURRENT_ID.
+// The current task itself is the root, so we render its children at depth 0.
+function renderSubtree() {
+  const children = childrenOf[CURRENT_ID] || [];
+  if (children.length === 0) {
+    return '<p class="empty" style="padding:12px 16px;">No subtasks.</p>';
+  }
+  return children.map(c => renderNode(c, 0, new Set())).join('');
+}
+
+// "Full tree" — shows the entire tree starting from the root ancestor.
+// CURRENT_ID is highlighted wherever it appears in the tree.
+function renderFullTree() {
+  const root = taskById[ROOT_ID];
+  if (!root) return '';
+  return renderNode(root, 0, new Set());
+}
+
+// ── initial render & toggle wiring ──────────────────────────────────────
+
+const container   = document.getElementById('tree-container');
+const btnSubtree  = document.getElementById('btn-subtree');
+const btnFulltree = document.getElementById('btn-fulltree');
+
+// default view: "from here" (children of the current task)
+container.innerHTML = renderSubtree();
+
+// toggle buttons are only rendered by Jinja when ROOT_ID !== CURRENT_ID
+if (btnSubtree && btnFulltree) {
+  btnSubtree.addEventListener('click', () => {
+    container.innerHTML = renderSubtree();
+    btnSubtree.className  = 'btn-sm btn-active';
+    btnFulltree.className = 'btn-ghost btn-sm';
+  });
+
+  btnFulltree.addEventListener('click', () => {
+    container.innerHTML = renderFullTree();
+    btnFulltree.className = 'btn-sm btn-active';
+    btnSubtree.className  = 'btn-ghost btn-sm';
+  });
+}
+</script>
 
 {% endblock %}

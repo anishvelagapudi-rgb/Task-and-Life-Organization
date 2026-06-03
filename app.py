@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db
 from classes.Task import Task
@@ -79,6 +80,14 @@ def logout():
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
+def parse_task(d):
+    """Deserialize JSON columns on a task dict loaded from the DB."""
+    for field in ("tags", "dependencies", "task_notes"):
+        raw = d.get(field)
+        d[field] = json.loads(raw) if raw else []
+    return d
+
+
 def all_projects():
     return [dict(r) for r in get_db().execute("SELECT * FROM projects ORDER BY title").fetchall()]
 
@@ -122,7 +131,7 @@ def get_tasks():
         ORDER BY t.created_at DESC
     """).fetchall()
     return render_template("tasks.html",
-                           tasks=[dict(r) for r in tasks],
+                           tasks=[parse_task(dict(r)) for r in tasks],
                            projects=all_projects())
 
 
@@ -152,10 +161,51 @@ def get_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
     db = get_db()
+
+    # fetch the full task row (all columns) for the detail view
     row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return "Task not found", 404
-    return render_template("task_detail.html", task=dict(row), projects=all_projects())
+    task = parse_task(dict(row))
+
+    # fetch a lightweight version of every task (only what the client needs to
+    # render the tree). the browser uses parent_task_id to figure out
+    # relationships, so we never build a tree structure on the server.
+    all_tasks = [dict(r) for r in db.execute(
+        "SELECT id, title, status, priority, parent_task_id FROM tasks"
+    ).fetchall()]
+
+    # id → task dict so we can do O(1) lookups by id on the server too
+    task_map = {t['id']: t for t in all_tasks}
+
+    # walk up the parent_task_id chain until we hit a task with no parent.
+    # root_id is used by the client to know where to start the "full tree" view.
+    root_id = task_id
+    cur = task
+    while cur.get('parent_task_id'):
+        parent = task_map.get(cur['parent_task_id'])
+        if not parent:
+            break
+        cur = parent
+        root_id = cur['id']
+
+    # look up the immediate parent for the breadcrumb shown at the top of the page
+    parent_task = task_map.get(task['parent_task_id']) if task.get('parent_task_id') else None
+
+    # resolve dependency IDs → task dicts so the template can render titles + links
+    dep_tasks = [task_map[d] for d in task['dependencies'] if d in task_map]
+
+    # all tasks except the current one — used to populate the "parent task" dropdown
+    other_tasks = [t for t in all_tasks if t['id'] != task_id]
+
+    return render_template("task_detail.html",
+                           task=task,
+                           all_tasks_json=json.dumps(all_tasks),  # sent to JS for tree rendering
+                           root_id=root_id,
+                           parent_task=parent_task,
+                           dep_tasks=dep_tasks,
+                           other_tasks=other_tasks,
+                           projects=all_projects())
 
 
 @app.route("/tasks/<int:task_id>", methods=["POST"])
@@ -163,10 +213,22 @@ def update_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
     db = get_db()
+
     row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return "Task not found", 404
+
+    # load existing task so we can preserve fields that aren't in the edit form.
+    # dependencies and task_notes have no form UI yet, so we carry them forward
+    # unchanged rather than wiping them on every save.
+    existing = parse_task(dict(row))
     data = request.form
+
+    # tags come in as a comma-separated string from the form (e.g. "coding, research").
+    # if the field is empty we keep whatever tags were already saved.
+    tags_raw = data.get("tags", "").strip()
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else existing['tags']
+
     task = Task(
         id=task_id,
         title=data["title"],
@@ -179,9 +241,49 @@ def update_task(task_id):
         fear_level=data.get("fear_level") or None,
         ambiguity_level=data.get("ambiguity_level") or None,
         project_id=data.get("project_id") or None,
+        parent_task_id=data.get("parent_task_id") or None,  # None = root-level task
+        tags=tags,
+        dependencies=existing['dependencies'],   # carried forward unchanged
+        task_notes=existing['task_notes'],        # carried forward unchanged
     )
     task.db_push(db)
-    return redirect("/tasks")
+
+    # redirect back to the same task page, not the list
+    return redirect(url_for('get_task', task_id=task_id))
+
+
+@app.route("/tasks/<int:task_id>/complete", methods=["POST"])
+def complete_task(task_id):
+    if not get_current_user():
+        return redirect(url_for('login'))
+    db = get_db()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    row = db.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return "Not found", 404
+
+    # toggle: if already done, revert to inbox; otherwise mark done
+    if row['status'] == 'done':
+        new_status = 'inbox'
+        db.execute(
+            "UPDATE tasks SET status='inbox', completed_at=NULL, updated_at=? WHERE id=?",
+            (now, task_id)
+        )
+    else:
+        new_status = 'done'
+        db.execute(
+            "UPDATE tasks SET status='done', completed_at=?, updated_at=? WHERE id=?",
+            (now, now, task_id)
+        )
+
+    db.commit()
+
+    # fetch calls get JSON back so JS knows which direction the toggle went
+    if request.headers.get('X-Requested-With') == 'fetch':
+        return json.dumps({'status': new_status}), 200, {'Content-Type': 'application/json'}
+    return redirect(request.referrer or url_for('get_tasks'))
 
 
 @app.route("/tasks/<int:task_id>/delete")

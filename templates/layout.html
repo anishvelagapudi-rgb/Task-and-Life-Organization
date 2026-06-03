@@ -152,6 +152,66 @@
     .empty { color: var(--muted); font-size: 13px; padding: 24px 0; }
 
     .section { margin-bottom: 40px; }
+
+    /* task controls bar */
+    .ctrl-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .ctrl-bar .filters {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    select.filter-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      width: auto;
+      cursor: pointer;
+      outline: none;
+    }
+    select.filter-select:focus { border-color: var(--accent); }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+    .sort-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
+
+    /* hide advanced columns in simple view */
+    table.simple .adv-col { display: none; }
+
+    /* complete button column in task list */
+    .complete-col { width: 28px; padding: 4px 4px 4px 8px; }
+    .complete-col button {
+      opacity: 0;
+      transition: opacity 0.1s;
+      background: transparent;
+      border: 1px solid var(--success);
+      color: var(--success);
+      padding: 2px 6px;
+      font-size: 11px;
+      border-radius: 3px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    tr:hover .complete-col button { opacity: 1; }
+    /* revert state: warn color when hovering a done row */
+    tr[data-status="done"] .complete-col button { border-color: var(--warn); color: var(--warn); }
+    /* green tint on completed rows */
+    tr[data-status="done"] td { background: rgba(74, 255, 145, 0.18); }
+
+    /* subtask tree */
+    .tree-row { padding: 8px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .tree-row:last-child { border-bottom: none; }
+    .tree-row.tree-current { background: rgba(74, 158, 255, 0.07); }
+    .tree-connector { color: var(--muted); margin-right: 4px; }
+    .btn-active { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
   </style>
 </head>
 <body>

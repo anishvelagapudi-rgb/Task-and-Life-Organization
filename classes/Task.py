@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 
@@ -17,6 +18,9 @@ class Task:
         parent_task_id=None,
         source_type="manual",
         ai_generated=False,
+        tags=None,
+        dependencies=None,
+        task_notes=None,
         id=None,
     ):
         self.id = id
@@ -34,6 +38,9 @@ class Task:
         self.parent_task_id = parent_task_id
         self.source_type = source_type
         self.ai_generated = ai_generated
+        self.tags = tags if tags is not None else []              # list of strings
+        self.dependencies = dependencies if dependencies is not None else []  # list of task IDs
+        self.task_notes = task_notes if task_notes is not None else []  # list of {note_path, relationship_type}
         self.created_at = datetime.now(timezone.utc)
         self.updated_at = datetime.now(timezone.utc)
 
@@ -51,14 +58,16 @@ class Task:
                     energy_type, fear_level, ambiguity_level,
                     project_id, parent_task_id,
                     source_type, ai_generated,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    tags, dependencies, task_notes
                 ) VALUES (
                     ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
-                    ?, ?
+                    ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -68,6 +77,7 @@ class Task:
                     self.project_id, self.parent_task_id,
                     self.source_type, self.ai_generated,
                     self.created_at, self.updated_at,
+                    json.dumps(self.tags), json.dumps(self.dependencies), json.dumps(self.task_notes),
                 ),
             )
             self.id = cursor.lastrowid
@@ -80,7 +90,8 @@ class Task:
                     energy_type=?, fear_level=?, ambiguity_level=?,
                     project_id=?, parent_task_id=?,
                     source_type=?, ai_generated=?,
-                    updated_at=?
+                    updated_at=?,
+                    tags=?, dependencies=?, task_notes=?
                 WHERE id=?
                 """,
                 (
@@ -89,7 +100,9 @@ class Task:
                     self.energy_type, self.fear_level, self.ambiguity_level,
                     self.project_id, self.parent_task_id,
                     self.source_type, self.ai_generated,
-                    self.updated_at, self.id,
+                    self.updated_at,
+                    json.dumps(self.tags), json.dumps(self.dependencies), json.dumps(self.task_notes),
+                    self.id,
                 ),
             )
 
@@ -106,4 +119,3 @@ class Task:
             f"estimated_effort={self.estimated_effort}, energy_type={self.energy_type!r}, "
             f"fear_level={self.fear_level}, ambiguity_level={self.ambiguity_level})"
         )
-

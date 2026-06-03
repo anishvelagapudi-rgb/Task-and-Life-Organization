@@ -2,40 +2,131 @@
 {% block title %}Tasks{% endblock %}
 {% block content %}
 
-<h1>Tasks</h1>
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+  <h1 style="margin:0;">
+    Tasks
+    <span id="task-count" style="font-size:13px; font-weight:400; color:var(--muted); margin-left:8px;"></span>
+  </h1>
+  <!-- tab toggle: List vs Tree -->
+  <div style="display:flex; gap:6px;">
+    <button id="tab-list" class="btn-sm btn-active" onclick="switchTab('list')">List</button>
+    <button id="tab-tree" class="btn-ghost btn-sm" onclick="switchTab('tree')">Tree</button>
+  </div>
+</div>
 
-<div class="section">
-  <h2>All Tasks</h2>
-  {% if tasks %}
-  <table>
+<!-- ctrl-bar only shown in list view -->
+<div id="list-controls" class="ctrl-bar">
+  <div class="filters">
+    <select id="f-status" class="filter-select">
+      <option value="">All Status</option>
+      <option value="inbox">Inbox</option>
+      <option value="active">Active</option>
+      <option value="blocked">Blocked</option>
+      <option value="done">Done</option>
+      <option value="archived">Archived</option>
+    </select>
+    <select id="f-priority" class="filter-select">
+      <option value="">All Priority</option>
+      <option value="critical">Critical</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+    </select>
+    <select id="f-energy" class="filter-select">
+      <option value="">All Energy</option>
+      <option value="deep_focus">Deep Focus</option>
+      <option value="light_admin">Light Admin</option>
+      <option value="creative">Creative</option>
+      <option value="social">Social</option>
+      <option value="low_energy">Low Energy</option>
+    </select>
+    <select id="f-project" class="filter-select">
+      <option value="">All Projects</option>
+      {% for p in projects %}
+      <option value="{{ p.id }}">{{ p.title }}</option>
+      {% endfor %}
+    </select>
+    <div class="sort-sep"></div>
+    <select id="sort-by" class="filter-select">
+      <option value="created">Sort: Created</option>
+      <option value="due">Sort: Due Date</option>
+      <option value="priority">Sort: Priority</option>
+      <option value="title">Sort: Title</option>
+      <option value="fear">Sort: Fear</option>
+    </select>
+    <button id="sort-dir" class="btn-ghost btn-sm" title="Toggle sort direction">↓</button>
+    <button id="reset-btn" class="btn-ghost btn-sm">Reset</button>
+  </div>
+  <button id="toggle-view" class="btn-ghost btn-sm">Advanced View</button>
+</div>
+
+<!-- ── list view ────────────────────────────────────────────────────────────── -->
+<div id="view-list">
+
+{% if tasks %}
+<div class="section" style="margin-bottom:16px;">
+  <table id="task-table" class="simple">
     <thead>
       <tr>
         <th>Title</th>
         <th>Status</th>
         <th>Priority</th>
-        <th>Energy</th>
         <th>Due</th>
-        <th>Fear</th>
-        <th>Project</th>
+        <th>Energy</th>
+        <th class="adv-col">Fear</th>
+        <th class="adv-col">Ambiguity</th>
+        <th class="adv-col">Effort (min)</th>
+        <th class="adv-col">Project</th>
+        <th class="adv-col">Tags</th>
+        <th class="complete-col"></th>
       </tr>
     </thead>
     <tbody>
       {% for task in tasks %}
-      <tr>
+      <tr
+        data-status="{{ task.status }}"
+        data-priority="{{ task.priority }}"
+        data-energy="{{ task.energy_type or '' }}"
+        data-project-id="{{ task.project_id or '' }}"
+        data-due="{{ task.due_date or '' }}"
+        data-title="{{ task.title }}"
+        data-created="{{ task.created_at }}"
+        data-fear="{{ task.fear_level or '' }}"
+      >
         <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
-        <td><span class="badge {{ task.status }}">{{ task.status }}</span></td>
+        <td><span class="badge {{ task.status }} status-badge">{{ task.status }}</span></td>
         <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
-        <td>{{ task.energy_type or '—' }}</td>
         <td>{{ task.due_date or '—' }}</td>
-        <td>{{ task.fear_level or '—' }}</td>
-        <td>{{ task.project_title or '—' }}</td>
+        <td>{{ task.energy_type or '—' }}</td>
+        <td class="adv-col">{{ task.fear_level or '—' }}</td>
+        <td class="adv-col">{{ task.ambiguity_level or '—' }}</td>
+        <td class="adv-col">{{ task.estimated_effort or '—' }}</td>
+        <td class="adv-col">{{ task.project_title or '—' }}</td>
+        <td class="adv-col">{{ task.tags | join(', ') if task.tags else '—' }}</td>
+        <td class="complete-col">
+          <button onclick="toggleComplete(this, {{ task.id }})" title="Toggle complete">
+            {{ '↩' if task.status == 'done' else '✓' }}
+          </button>
+        </td>
       </tr>
       {% endfor %}
+      <tr data-system="true" id="empty-row" style="display:none;">
+        <td colspan="10" class="empty" style="padding:24px 12px;">No tasks match the current filters.</td>
+      </tr>
     </tbody>
   </table>
-  {% else %}
-  <p class="empty">No tasks yet.</p>
-  {% endif %}
+</div>
+{% else %}
+<p class="empty">No tasks yet.</p>
+{% endif %}
+
+</div> <!-- /view-list -->
+
+<!-- ── tree view ────────────────────────────────────────────────────────────── -->
+<div id="view-tree" style="display:none;">
+  <div class="card" style="padding:0;">
+    <div id="tree-container"></div>
+  </div>
 </div>
 
 <div class="section">
@@ -114,5 +205,194 @@
     </form>
   </div>
 </div>
+
+<script>
+(function () {
+  const table = document.getElementById('task-table');
+  if (!table) return;
+
+  const tbody = table.querySelector('tbody');
+  const allRows = Array.from(tbody.querySelectorAll('tr:not([data-system])'));
+  const emptyRow = document.getElementById('empty-row');
+  const countEl = document.getElementById('task-count');
+
+  const PRIORITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+  let sortField = 'created';
+  let sortAsc = false; // default: newest first
+
+  function apply() {
+    const status   = document.getElementById('f-status').value;
+    const priority = document.getElementById('f-priority').value;
+    const energy   = document.getElementById('f-energy').value;
+    const project  = document.getElementById('f-project').value;
+
+    const visible = [];
+    allRows.forEach(row => {
+      const show = (
+        (!status   || row.dataset.status    === status)   &&
+        (!priority || row.dataset.priority  === priority) &&
+        (!energy   || row.dataset.energy    === energy)   &&
+        (!project  || row.dataset.projectId === project)
+      );
+      if (show) visible.push(row);
+      else row.style.display = 'none';
+    });
+
+    visible.sort((a, b) => {
+      let av, bv;
+      if (sortField === 'priority') {
+        av = PRIORITY_RANK[a.dataset.priority] || 0;
+        bv = PRIORITY_RANK[b.dataset.priority] || 0;
+      } else if (sortField === 'fear') {
+        av = parseInt(a.dataset.fear)  || 0;
+        bv = parseInt(b.dataset.fear)  || 0;
+      } else if (sortField === 'due') {
+        av = a.dataset.due || '9999-99-99';
+        bv = b.dataset.due || '9999-99-99';
+      } else if (sortField === 'title') {
+        av = a.dataset.title.toLowerCase();
+        bv = b.dataset.title.toLowerCase();
+      } else {
+        av = a.dataset.created || '';
+        bv = b.dataset.created || '';
+      }
+      const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+      return sortAsc ? cmp : -cmp;
+    });
+
+    visible.forEach(row => { row.style.display = ''; tbody.insertBefore(row, emptyRow); });
+    emptyRow.style.display = visible.length === 0 ? '' : 'none';
+    if (countEl) countEl.textContent = `${visible.length} task${visible.length !== 1 ? 's' : ''}`;
+  }
+
+  document.getElementById('sort-by').addEventListener('change', function () {
+    sortField = this.value;
+    apply();
+  });
+
+  document.getElementById('sort-dir').addEventListener('click', function () {
+    sortAsc = !sortAsc;
+    this.textContent = sortAsc ? '↑' : '↓';
+    apply();
+  });
+
+  ['f-status', 'f-priority', 'f-energy', 'f-project'].forEach(id =>
+    document.getElementById(id).addEventListener('change', apply)
+  );
+
+  document.getElementById('reset-btn').addEventListener('click', function () {
+    ['f-status', 'f-priority', 'f-energy', 'f-project'].forEach(id =>
+      document.getElementById(id).value = ''
+    );
+    document.getElementById('sort-by').value = 'created';
+    document.getElementById('sort-dir').textContent = '↓';
+    sortField = 'created';
+    sortAsc = false;
+    apply();
+  });
+
+  let isAdvanced = false;
+  document.getElementById('toggle-view').addEventListener('click', function () {
+    isAdvanced = !isAdvanced;
+    table.classList.toggle('simple', !isAdvanced);
+    this.textContent = isAdvanced ? 'Simple View' : 'Advanced View';
+  });
+
+  apply();
+})();
+
+// ── complete task (list view) ────────────────────────────────────────────────
+
+// toggles a task between done and inbox without a page reload.
+// the server returns {status: 'done'|'inbox'} so we know which direction it went.
+function toggleComplete(btn, taskId) {
+  fetch(`/tasks/${taskId}/complete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(r => r.json())
+  .then(data => {
+    const row = btn.closest('tr');
+    row.dataset.status = data.status;           // drives green-row CSS and filter logic
+    const badge = row.querySelector('.status-badge');
+    badge.className   = `badge ${data.status} status-badge`;
+    badge.textContent = data.status;
+    btn.textContent   = data.status === 'done' ? '↩' : '✓';  // flip the button symbol
+  });
+}
+</script>
+
+<script>
+// ── tab switching ────────────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  const isTree = tab === 'tree';
+  document.getElementById('view-list').style.display      = isTree ? 'none' : '';
+  document.getElementById('list-controls').style.display  = isTree ? 'none' : '';
+  document.getElementById('view-tree').style.display      = isTree ? '' : 'none';
+  document.getElementById('tab-list').className = isTree ? 'btn-ghost btn-sm' : 'btn-sm btn-active';
+  document.getElementById('tab-tree').className = isTree ? 'btn-sm btn-active' : 'btn-ghost btn-sm';
+  if (isTree) renderTree();
+}
+
+// ── tree rendering ───────────────────────────────────────────────────────────
+
+// tasks is already available from Jinja — pull only the fields the tree needs
+const ALL_TASKS = {{ tasks | tojson }};
+
+// taskById[id] → task   (O(1) lookup)
+// childrenOf[parent_id] → array of child tasks
+const taskById   = {};
+const childrenOf = {};
+
+ALL_TASKS.forEach(t => {
+  taskById[t.id] = t;
+  // null key = root-level tasks (no parent)
+  const pid = t.parent_task_id ?? null;
+  if (!childrenOf[pid]) childrenOf[pid] = [];
+  childrenOf[pid].push(t);
+});
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// renders one node and all its descendants; visited guards against cycles
+function renderNode(t, depth, visited) {
+  if (visited.has(t.id)) return '';
+  visited.add(t.id);
+
+  const indent = 8 + depth * 20;
+  let html = `<div class="tree-row" style="padding-left:${indent}px">`;
+  if (depth > 0) html += '<span class="tree-connector">└─ </span>';
+  html += `<a href="/tasks/${t.id}">${escHtml(t.title)}</a>`;
+  html += ` <span class="badge ${t.status}">${t.status}</span>`;
+  html += ` <span class="badge ${t.priority}">${t.priority}</span>`;
+  html += '</div>';
+
+  for (const child of (childrenOf[t.id] || [])) {
+    html += renderNode(child, depth + 1, visited);
+  }
+  return html;
+}
+
+let treeRendered = false;
+
+function renderTree() {
+  if (treeRendered) return; // only build the DOM once
+  treeRendered = true;
+
+  const roots     = childrenOf[null] || [];
+  const container = document.getElementById('tree-container');
+
+  if (roots.length === 0) {
+    container.innerHTML = '<p class="empty" style="padding:12px 16px;">No tasks yet.</p>';
+    return;
+  }
+
+  // render each root and its full subtree
+  container.innerHTML = roots.map(r => renderNode(r, 0, new Set())).join('');
+}
+</script>
 
 {% endblock %}
