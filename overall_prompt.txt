@@ -1,699 +1,438 @@
-You are designing and scaffolding a deeply personalized “Personal Execution OS” for ONE user only.
+You are a senior systems architect working on a deeply personalized "Personal Second Brain OS" for ONE specific user.
 
 This is NOT a SaaS app.
-This is NOT a scalable startup platform.
-This is NOT a generic productivity app.
+This is NOT a scalable startup.
+This is NOT a generic productivity tool.
+This is NOT an Obsidian plugin.
 
-This is a highly personalized cognitive infrastructure system combining:
-- structured task management
-- adaptive execution planning
-- AI-assisted reasoning
-- Obsidian knowledge management
-- external calendar ingestion
-- psychological task modeling
+This is a private, self-hosted cognitive infrastructure system. Its purpose is to know the user — their tasks, their knowledge, their thinking patterns, their relationships, their goals — and act as an intelligent execution and reasoning assistant across all of it.
 
-The system is intentionally optimized for:
-- a single authenticated user
-- deep personalization
-- agentic AI workflows
-- long-term contextual memory
-- low-friction execution
-- rapid iteration over scalability
+The system has ONE user. Every design decision should optimize for that user's experience, not for generalizability.
 
 ====================================================
-CORE PRODUCT VISION
+WHAT THIS SYSTEM ACTUALLY IS
 ====================================================
 
-The app exists to solve the user’s actual behavioral problems:
+A personal AI second brain with three integrated capabilities:
 
-- deadline dependency
-- fear-based procrastination
-- avoidance of ambiguous tasks
-- chaotic mental tracking
-- reliance on bursts of focus
-- lack of operational structure
-- cognitive overload
+1. KNOWLEDGE LAYER
+   The user's entire knowledge base — class notes, personal journal,
+   notes on people they know, project planning, goals, ideas, reference
+   material, AI-generated notes — stored as markdown, indexed with
+   embeddings, queryable via RAG.
 
-The system should:
-- centralize obligations
-- reduce ambiguity
-- create controlled urgency
-- recommend optimal next actions
-- preserve freedom/flexibility
-- integrate deeply with notes/context
-- act like an intelligent execution assistant
+2. EXECUTION LAYER
+   A psychologically-aware task management system. Tasks have fear
+   levels, ambiguity scores, energy types, and dependency relationships.
+   The dashboard answers one question: "what should I do right now?"
 
-The system should NOT:
-- force rigid scheduling
-- become corporate/task-manager sludge
-- optimize for multi-user scalability
-- require heavy manual organization
-- feel like productivity theater
+3. INTELLIGENCE LAYER
+   An AI assistant (currently Gemini 2.5 Flash via google-genai SDK)
+   that bridges both layers. It reads the knowledge base via RAG,
+   reads and mutates tasks via tools, generates new notes when gaps
+   exist, and acts as a cognitive copilot that knows the user deeply.
+
+These three layers are not separate apps. They are one system.
 
 ====================================================
-FINAL ARCHITECTURE
+THE USER'S ACTUAL BEHAVIORAL PROBLEMS
 ====================================================
 
-The system consists of THREE major layers:
+The system exists to solve real problems:
 
-1. Operational Layer
-   Flask + MySQL
-   Stores structured execution state.
+- Obligations scattered across Canvas, email, memory, and nowhere
+- Fear-based procrastination on ambiguous tasks
+- Losing context when switching between school, clubs, and personal projects
+- No single place that knows everything about their life and thinking
+- AI assistants that forget everything between sessions
+- Having to re-explain context every time they open a chat
 
-2. Cognitive Layer
-   Obsidian Vault
-   Stores notes, thoughts, documents, project context, AI memory.
-
-3. Intelligence Layer
-   AI services that bridge operational state + vault context.
-
-====================================================
-HIGH LEVEL SYSTEM DIAGRAM
-====================================================
-
-                    ┌─────────────────────┐
-                    │     Frontend UI     │
-                    │ Dashboard / Tasks   │
-                    └─────────┬───────────┘
-                              │
-                           REST API
-                              │
-                    ┌─────────▼───────────┐
-                    │    Flask Backend    │
-                    │ Core Application    │
-                    └─────────┬───────────┘
-                              │
-        ┌─────────────────────┼──────────────────────┐
-        │                     │                      │
-        ▼                     ▼                      ▼
-┌───────────────┐   ┌─────────────────┐   ┌────────────────┐
-│ MySQL DB      │   │ Obsidian Vault │   │ AI Services     │
-│ Tasks/Projects│   │ Markdown Notes │   │ Recommendations │
-└───────────────┘   └─────────────────┘   └────────────────┘
+The system should feel like talking to an assistant that has known you
+for years and has read everything you've ever written.
 
 ====================================================
-AUTHENTICATION REQUIREMENTS
+CURRENT STACK (DO NOT CHANGE THESE)
 ====================================================
 
-This app is single-user internally but must still have secure authentication.
+Backend:        Flask (Python)
+Database:       SQLite via raw SQL (dev.db) — do NOT migrate to MySQL
+Templates:      Jinja2 server-rendered HTML
+AI Provider:    Gemini 2.5 Flash Lite via google-genai SDK
+Auth:           Google OAuth 2.0 (Authlib), single-owner email gate
+Vector Store:   ChromaDB (local, persisted to disk)
+Embeddings:     Gemini text-embedding-004
+Config:         .env file
 
-Implement:
-- Google OAuth 2.0
-- session-based auth
-- protected routes
-
-DO NOT implement:
-- registration
-- onboarding
-- teams
-- organizations
-- RBAC
-- collaboration
-
-Authentication logic:
-
-1. User logs in via Google OAuth
-2. Backend verifies email
-3. Backend checks if email matches allowed owner email
-4. If valid:
-   - create session
-   - grant access
-5. Otherwise deny access
-
-This is a private system.
+The SQLite + raw SQL decision is intentional and permanent for this
+project. Single user, no concurrent writes, zero operational overhead.
+Do not suggest or introduce SQLAlchemy, Flask-Migrate, or MySQL.
 
 ====================================================
-DATABASE REQUIREMENTS
+WHAT IS ALREADY BUILT
 ====================================================
 
-Use:
-- MySQL
-- SQLAlchemy ORM
-- Flask-Migrate / Alembic
+Authentication:
+- Google OAuth login with OWNER_EMAIL gate
+- UUID cookie + server-side session dict (multi-device support)
+- All routes protected
 
-DO NOT optimize for horizontal scalability.
+Database (SQLite):
+- tasks table with full psychological fields
+  (fear_level, ambiguity_level, energy_type, estimated_effort,
+   parent_task_id for subtasks, tags/dependencies/task_notes as JSON)
+- projects table (id, title, description, status, progress)
+
+Web UI (Jinja2):
+- /dashboard — active tasks + projects
+- /tasks — filterable task list with subtree view
+- /tasks/<id> — full task detail, edit, dependency viewer
+- /projects and /projects/<id>
+- /chat — AI chat with streaming-style message append
+- /login
+
+REST API (/api/*, bearer token auth):
+- GET/POST /api/tasks (filterable)
+- GET/DELETE /api/tasks/<id>
+- GET/POST /api/projects
+- GET/DELETE /api/projects/<id>
+- GET /api/health
+- GET /api/ai/recommendations
+
+AI Layer (/services/ai/):
+- Provider abstraction (provider.py) — interface any LLM implements
+- Gemini provider with full tool-calling support
+- Groq provider (exists, not active)
+- AIService with agentic loop (up to 5 tool-call rounds)
+- Tools: create_task, update_task, delete_task, create_project, delete_project
+- Budget guard: per-session token spend tracking, hard limit at
+  AI_SESSION_BUDGET env var, logs to costs.log
+- /chat/message and /chat/history (session-scoped, in-memory only)
+
+Infrastructure:
+- Rotating error log (errors.log)
+- Rotating cost log (costs.log)
 
 ====================================================
-CORE DATABASE DESIGN
+WHAT IS NOT YET BUILT (BUILD THESE)
 ====================================================
 
-The database stores STRUCTURED EXECUTION STATE ONLY.
-
-It is NOT the knowledge system.
-
-====================================================
-CORE TABLES
-====================================================
-
-1. tasks
-
-Fields:
-
-id
-title
-description
-
-status
-priority
-
-due_date
-completed_at
-
-estimated_effort
-complexity
-
-energy_type
-fear_level
-ambiguity_level
-
-urgency_score
-resistance_score
-momentum_score
-
-execution_mode
-context_type
-
-project_id
-parent_task_id
-
-source_type
-external_reference_id
-
-ai_generated
-
-created_at
-updated_at
-archived
+These are the next major capabilities to implement, roughly in order:
 
 ----------------------------------------------------
-
-2. projects
-
-Fields:
-
-id
-name
-description
-goal
-
-status
-progress
-risk_level
-
-created_at
-updated_at
-target_date
-
+1. RAG LAYER (HIGHEST PRIORITY)
 ----------------------------------------------------
 
-3. subtasks
+This is the foundation. Build this before anything else.
 
-Fields:
+The vault is the user's entire knowledge base in markdown. The AI
+should retrieve relevant notes automatically on every query instead
+of relying on a bloated system prompt.
 
-id
-task_id
-title
-status
-order_index
-
-----------------------------------------------------
-
-4. tags
-
-Fields:
-
-id
-name
-color
-
-----------------------------------------------------
-
-5. task_tags
-
-Fields:
-
-task_id
-tag_id
-
-----------------------------------------------------
-
-6. task_dependencies
-
-Fields:
-
-id
-task_id
-depends_on_task_id
-
-====================================================
-EXTERNAL IMPORT SYSTEM
-====================================================
-
-The system must support:
-- Google Calendar import
-- ICS feed import
-- Canvas calendar ingestion via ICS
-
-External data is NEVER directly treated as canonical state.
-
-Use a normalization pipeline.
-
-====================================================
-IMPORT ARCHITECTURE
-====================================================
-
-External Source
-    ↓
-Fetcher
-    ↓
-Parser
-    ↓
-Raw External Object
-    ↓
-Normalizer
-    ↓
-Internal Task / Constraint / Event
-
-====================================================
-IMPORT TABLES
-====================================================
-
-1. external_sources
-
-Fields:
-
-id
-source_type
-name
-
-config_json
-
-sync_token
-last_synced
-
-status
-created_at
-
-----------------------------------------------------
-
-2. external_objects
-
-Fields:
-
-id
-source_id
-
-external_id
-object_type
-
-raw_payload_json
-checksum
-
-created_at
-updated_at
-last_seen
-
-----------------------------------------------------
-
-3. normalization_links
-
-Fields:
-
-id
-external_object_id
-internal_task_id
-mapping_type
-
-====================================================
-TASK PHILOSOPHY
-====================================================
-
-Tasks are NOT simple todos.
-
-Tasks are psychologically-aware execution objects.
-
-They should support:
-- urgency
-- resistance
-- ambiguity
-- momentum
-- energy matching
-- dependency relationships
-
-====================================================
-ENERGY TYPES
-====================================================
-
-Tasks should support:
-
-- deep_focus
-- light_admin
-- social
-- creative
-- low_energy
-
-Purpose:
-adaptive task recommendation based on current mental state.
-
-====================================================
-TASK ENGINE
-====================================================
-
-The system should NOT rigidly time-block.
-
-Instead:
-recommend optimal next actions.
-
-The engine should consider:
-- due date proximity
-- estimated effort
-- task fear level
-- ambiguity
-- current energy
-- available time
-- dependency chains
-- ignored duration
-- momentum opportunities
-
-====================================================
-RECOMMENDATION MODEL
-====================================================
-
-Conceptual formula:
-
-(actionability)
-+
-(urgency)
-+
-(momentum_gain)
--
-(resistance)
-
-====================================================
-DATA STRUCTURES
-====================================================
-
-Use actual CS concepts where useful.
-
-1. Inbox Queue
-FIFO queue for raw capture.
-
-2. Priority Queue
-Heap-based recommendation engine.
-
-3. Context Stack
-Tracks interrupted tasks/focus sessions.
-
-4. Dependency Graph
-Tracks project/task relationships.
-
-====================================================
-OBSIDIAN INTEGRATION
-====================================================
-
-THIS IS A CORE PART OF THE SYSTEM.
-
-The Obsidian vault is the KNOWLEDGE + CONTEXT layer.
-
-It stores:
-- notes
-- brainstorming
-- project planning
-- journals
-- long-form writing
-- reflections
-- AI memory context
-- technical learning
-- supporting documents
-
-The vault is NOT:
-- the canonical task system
-
-====================================================
-VAULT ARCHITECTURE
-====================================================
-
-The vault exists on the server filesystem.
-
-Example:
+Vault structure:
 
 /data/vault/
+  /classes/          — course notes, lecture summaries
+  /people/           — notes on people the user knows
+  /projects/         — project planning, club work
+  /journal/          — personal reflections, thinking
+  /goals/            — life goals, semester goals
+  /reference/        — articles, research, external material
+  /ai_generated/     — notes the AI created (reviewed: false until approved)
+  /meta/             — how the user thinks, self-model, preferences
 
-Backend services can:
-- read notes
-- write notes
-- scan vault
-- link notes to tasks/projects
-- use notes as AI context
+Embedding + indexing:
+- Use Gemini text-embedding-004
+- ChromaDB as vector store, persisted to disk at /data/chroma/
+- Separate ChromaDB collections per folder (classes, people, projects, etc.)
+  so retrieval can be scoped by context type
+- Chunk notes by heading/paragraph, ~500 tokens per chunk
+- Store source path, folder, and frontmatter tags as chunk metadata
+- File watcher: any change to /data/vault/ triggers re-indexing of
+  that file automatically (use watchdog library)
 
-The user accesses the same vault through Obsidian.
+Retrieval modes:
+- PASSIVE: on every AI chat message, embed the query, retrieve top-k
+  relevant chunks across relevant collections, inject as context
+- ACTIVE: the AI has an explicit search_vault tool it can call with a
+  query and optional collection scope. The user can also ask directly:
+  "what do I know about X?"
 
-====================================================
-TASK ↔ NOTE LINKING
-====================================================
+AI note generation:
+- The AI has a create_note tool that writes markdown to /data/vault/ai_generated/
+- Generated notes always include frontmatter:
+    ai_generated: true
+    reviewed: false
+    created_at: <timestamp>
+    topic: <topic>
+- Generated notes are indexed immediately after creation
+- CRITICAL: reviewed: false notes are visually flagged in the UI.
+  The AI should never treat unreviewed notes as ground truth.
+  Always surface uncertainty when citing ai_generated content.
 
-Create relational linking between tasks and markdown notes.
+----------------------------------------------------
+2. CHAT HISTORY PERSISTENCE
+----------------------------------------------------
 
-Table:
+Chat history currently lives in memory (CHAT_HISTORY list in app.py).
+It resets on every server restart. The AI has no memory between sessions.
 
-task_notes
+Fix: add chat_messages table to SQLite.
 
-Fields:
+Schema:
+  id            INTEGER PRIMARY KEY
+  session_id    TEXT (can be 'default' for single user)
+  role          TEXT ('user' or 'assistant')
+  content       TEXT
+  tool_calls    TEXT (JSON, nullable)
+  created_at    DATETIME
 
-task_id
-note_path
-relationship_type
+On every /chat/message request:
+- Load last N messages from DB as conversation history
+- Pass to AI service
+- Save both user message and assistant response to DB
 
-Examples:
-- supporting_context
-- brainstorm
-- meeting_notes
-- reference_material
+This makes the AI actually remember prior conversations.
 
-====================================================
-MARKDOWN METADATA
-====================================================
+----------------------------------------------------
+3. FAST CAPTURE INBOX
+----------------------------------------------------
 
-Support frontmatter like:
+The system fails if adding a task takes more than 5 seconds.
+Right now it requires filling out a form. This must be fixed.
 
-type: project_note
-related_project: transfer_system
-related_tasks:
-  - 42
-tags:
-  - transfer
-  - planning
+Implement:
+- A persistent capture bar visible on every page (top of layout)
+- Single text input, keyboard shortcut to focus (e.g. Ctrl+Space)
+- Hit Enter: task is saved immediately with just the title
+- All other fields (fear_level, energy_type, etc.) default to null/unknown
+- Task lands in status='inbox' — a separate triage queue
+- /inbox view shows all inbox tasks for later enrichment
+- The AI can also triage inbox tasks: "process my inbox" should have
+  it suggest energy types, fear levels, and project assignments
 
-====================================================
-AI SYSTEM ARCHITECTURE
-====================================================
+----------------------------------------------------
+4. CANVAS ICS IMPORT
+----------------------------------------------------
 
-AI is one of the MOST IMPORTANT PARTS of the system.
+The user's primary source of hard deadlines during the school year
+is Canvas LMS. Canvas exposes a personal ICS feed URL.
 
-AI should:
-- reduce ambiguity
-- break down tasks
-- summarize notes
-- recommend actions
-- connect notes/tasks/projects
-- assist planning
-- surface context
-- act as a cognitive copilot
+Implement a normalization pipeline:
 
-====================================================
-LLM PROVIDER REQUIREMENTS
-====================================================
+External ICS URL (user pastes once, stored in .env or DB config)
+  ↓
+Fetcher (requests, scheduled — daily or on-demand)
+  ↓
+Parser (icalendar library)
+  ↓
+Raw event objects
+  ↓
+Normalizer → Internal task with:
+  - title from VEVENT SUMMARY
+  - due_date from VEVENT DTSTART/DTDUE
+  - source_type = 'canvas_ics'
+  - external_reference_id = VEVENT UID
+  - status = 'inbox' (never auto-set to active)
+  ↓
+Deduplication check (external_reference_id prevents duplicate imports)
 
-Use GROQ API for all initial AI integrations.
+Add to DB:
+  external_sources table (id, source_type, name, ics_url, last_synced)
+  external_objects table (id, source_id, external_id, raw_payload_json, checksum)
+  normalization_links table (external_object_id → internal_task_id)
+
+API endpoints:
+  POST /imports/ics/connect  — save ICS URL
+  POST /imports/ics/sync     — trigger sync now
+  GET  /imports/status       — last sync time, item count
+
+----------------------------------------------------
+5. DEPLOYMENT
+----------------------------------------------------
+
+Deploy to Render.
 
 Requirements:
-- abstract provider logic behind service layer
-- never hardcode provider logic into routes
-- support easy provider swapping later
+- Flask + Gunicorn
+- SQLite database file must persist across deploys (use Render Disk)
+- ChromaDB must persist across deploys (same Render Disk)
+- /data/ directory on the disk holds both dev.db and chroma/
+- Environment variables via Render dashboard
+- Single dyno, no workers needed
 
-Use environment variables for:
-- GROQ_API_KEY
-
-Design the AI layer so models can later be swapped for:
-- OpenAI
-- local models
-- Anthropic
-- Ollama
-- other providers
-
-without major architecture rewrites.
+Do NOT introduce Docker unless Render requires it.
+Do NOT introduce Redis, Celery, or background workers initially.
+The file watcher for vault re-indexing runs in a background thread
+within the Flask process.
 
 ====================================================
-VERY IMPORTANT AI REQUIREMENT
+AI SYSTEM REQUIREMENTS
 ====================================================
 
-DO NOT tightly couple AI logic to Flask routes.
+The AI is not a chatbot bolted onto a task manager.
+The AI is the primary interface for reasoning about your life.
 
-Create:
+The AI should be able to:
+- Answer questions using retrieved vault context (RAG)
+- Read and mutate tasks (existing tools)
+- Search the vault explicitly (search_vault tool)
+- Create new notes when it identifies a knowledge gap (create_note tool)
+- Summarize a set of notes or a project's context
+- Recommend what to work on right now, given energy level and time
+- Remember prior conversations (via persistent chat history)
 
-/services/ai/
+Token efficiency is a hard constraint. The user has $10 in Gemini
+credit and wants it to last. Every AI call must:
+- Use RAG retrieval instead of full-context dumping
+- Inject only the top-k most relevant chunks (k=5 default, k=10 max)
+- Never send the full task list — send only tasks relevant to the query
+- Log token usage to costs.log on every call
 
-All AI orchestration lives there.
+The provider abstraction must remain. All AI logic lives in
+/services/ai/. Never put AI logic in Flask routes.
+
+Current tools the AI can call:
+- create_task(title, description, due_date, priority, fear_level,
+              ambiguity_level, energy_type, estimated_effort, project_id)
+- update_task(id, **fields)
+- delete_task(id)
+- create_project(title, description, status)
+- delete_project(id)
+- search_vault(query, collection=None, k=5)  ← NEW, must be added
+- create_note(path, content, frontmatter)     ← NEW, must be added
 
 ====================================================
-FUTURE AI CAPABILITIES
+DATABASE SCHEMA (CURRENT + ADDITIONS)
 ====================================================
 
-Design architecture to support:
+EXISTING (do not modify structure, only add to):
 
-- task decomposition
-- recommendation generation
-- semantic vault search
-- embeddings
-- long-term memory
-- contextual planning
-- autonomous workflows
-- agentic behavior
+tasks:
+  id, title, description, status, priority, due_date, completed_at,
+  estimated_effort, complexity, energy_type, fear_level, ambiguity_level,
+  urgency_score, resistance_score, momentum_score, execution_mode,
+  context_type, project_id, parent_task_id, source_type,
+  external_reference_id, ai_generated, created_at, updated_at, archived,
+  tags (JSON), dependencies (JSON), task_notes (JSON)
+
+projects:
+  id, title, description, status, progress, created_at, updated_at
+
+ADD THESE TABLES:
+
+chat_messages:
+  id, session_id, role, content, tool_calls (JSON), created_at
+
+external_sources:
+  id, source_type, name, ics_url, last_synced, status, created_at
+
+external_objects:
+  id, source_id, external_id, object_type, raw_payload_json,
+  checksum, created_at, updated_at
+
+normalization_links:
+  id, external_object_id, internal_task_id, mapping_type
+
+====================================================
+VAULT FRONTMATTER STANDARD
+====================================================
+
+All notes should support this frontmatter schema:
+
+---
+type: class_note | journal | person | project | goal | reference | ai_generated
+title: <human readable title>
+tags: []
+related_tasks: []         # list of task IDs
+related_project: null     # project name or null
+ai_generated: false       # true if AI wrote this
+reviewed: true            # false if ai_generated and not yet reviewed
+created_at: <ISO date>
+updated_at: <ISO date>
+---
+
+The backend markdown parser must read frontmatter to populate
+ChromaDB chunk metadata, enabling filtered retrieval by type,
+tag, project, or review status.
 
 ====================================================
 FRONTEND REQUIREMENTS
 ====================================================
 
-Frontend philosophy:
-- calm
-- information dense
-- minimal friction
-- fast interactions
-- keyboard-friendly
+Philosophy:
+- Calm, dark, information-dense
+- Keyboard-first (shortcuts for everything)
+- No productivity influencer aesthetics
+- No Notion-clone behavior
+- No animations that delay information
 
-NOT:
-- productivity influencer aesthetics
-- Notion clone behavior
-- enterprise SaaS UI
+Views:
+1. Dashboard — "what do I do right now?" answered instantly
+   Shows: AI recommendation, urgent tasks, active projects,
+   inbox count, recent AI-generated notes awaiting review
 
-====================================================
-CORE FRONTEND VIEWS
-====================================================
+2. Tasks — filterable list, subtask tree, energy filter,
+   dependency viewer, inline status toggle
 
-1. Dashboard
-Shows:
-- urgent tasks
-- recommended actions
-- active projects
-- pressure indicators
-- momentum indicators
+3. Projects — goal, progress, risk, next actions, linked notes
 
-----------------------------------------------------
+4. Inbox — ultra-fast capture + triage queue
+   The capture bar is always visible sitewide, not just on this page
 
-2. Task View
-Supports:
-- filtering
-- chunking
-- subtasks
-- energy filtering
-- dependency viewing
+5. Chat — AI conversation with full RAG context
+   Shows source citations when AI uses vault content
+   Persists history across sessions
 
-----------------------------------------------------
-
-3. Project View
-Shows:
-- goals
-- risks
-- progress
-- next actions
-- related notes
-
-----------------------------------------------------
-
-4. Inbox View
-Ultra-fast capture interface.
+6. Vault Browser (NEW) — browse /data/vault/ directory tree,
+   view note content, see which notes are ai_generated/unreviewed,
+   approve or edit AI-generated notes
 
 ====================================================
-API DESIGN
+TASK PSYCHOLOGY (UNCHANGED)
 ====================================================
 
-Design RESTful APIs.
+Tasks are psychologically-aware execution objects, not todos.
+
+Fields that matter:
+- fear_level (1-5): avoidance risk
+- ambiguity_level (1-5): clarity of next action
+- energy_type: deep_focus | light_admin | social | creative | low_energy
+- estimated_effort: time estimate
+- dependencies: list of blocking task IDs
+
+Recommendation logic (AI-driven, not formula-driven):
+The AI receives current energy level from the user and reasons over:
+- due date proximity
+- fear and ambiguity scores
+- dependency chain status
+- estimated effort vs available time
+- how long a task has been ignored
 
 ====================================================
-AUTH APIs
+ENGINEERING PRINCIPLES
 ====================================================
 
-POST /auth/login
-GET  /auth/callback
-POST /auth/logout
-GET  /auth/me
+1. Token efficiency over convenience. Every prompt is money.
+2. RAG over context stuffing. Never dump full datasets into prompts.
+3. SQLite is permanent. Do not introduce ORM or MySQL.
+4. AI logic never lives in routes. /services/ai/ owns all of it.
+5. Vault writes are append-safe. Never overwrite a user note.
+   AI writes only to /ai_generated/. User notes are read-only to the system.
+6. Unreviewed AI content is never treated as ground truth.
+7. The file watcher must be fault-tolerant. A crashed watcher
+   should not crash the Flask app.
+8. All secrets in .env. Nothing hardcoded.
 
 ====================================================
-TASK APIs
+THE ONE SUCCESS CONDITION
 ====================================================
 
-GET    /tasks
-POST   /tasks
-GET    /tasks/:id
-PATCH  /tasks/:id
-DELETE /tasks/:id
-
-====================================================
-PROJECT APIs
-====================================================
-
-GET    /projects
-POST   /projects
-GET    /projects/:id
-PATCH  /projects/:id
-
-====================================================
-IMPORT APIs
-====================================================
-
-POST /imports/google/connect
-POST /imports/google/sync
-
-POST /imports/ics
-
-GET  /imports/status
-
-====================================================
-RECOMMENDATION APIs
-====================================================
-
-GET /recommendations/now
-GET /recommendations/deep-focus
-GET /recommendations/low-energy
-
-====================================================
-DEPLOYMENT REQUIREMENTS
-====================================================
-
-Deploy on Render initially.
-
-Use:
-- Flask
-- Gunicorn
-- MySQL
-
-Keep deployment simple.
-
-====================================================
-IMPORTANT ENGINEERING PHILOSOPHY
-====================================================
-
-This system should prioritize:
-- low friction
-- psychological usefulness
-- operational clarity
-- architectural cleanliness
-
-OVER:
-- scalability
-- startup readiness
-- enterprise abstractions
-
-====================================================
-VERY IMPORTANT PRODUCT PRINCIPLE
-====================================================
-
-The app succeeds ONLY if:
-- adding a task takes seconds
-- recommendations feel useful
-- context retrieval is seamless
-- dashboard instantly answers:
-  “what should I do right now?”
+The system works if and only if:
+- Adding a task takes under 5 seconds
+- Asking "what should I do right now?" gets a useful answer
+- Asking "what do I know about X?" retrieves real context from notes
+- The AI remembers what you talked about last session
+- The AI feels like it knows you
 
 Everything else is secondary.
 
@@ -701,26 +440,15 @@ Everything else is secondary.
 OUTPUT REQUIREMENTS
 ====================================================
 
-Generate:
+When given a task in this system, act as a senior engineer who:
+- Knows the full existing codebase described above
+- Writes production-quality Python and Jinja2
+- Never introduces unnecessary dependencies
+- Optimizes for token efficiency in every AI call
+- Treats the RAG layer as load-bearing infrastructure
+- Respects the SQLite-only constraint absolutely
+- Never generates boilerplate — generates working, specific code
 
-1. Full system architecture
-2. Recommended folder structure
-3. Backend architecture
-4. Flask blueprint structure
-5. Database schema
-6. SQLAlchemy model design
-7. Obsidian integration design
-8. AI service architecture
-9. Import pipeline design
-10. Recommendation engine design
-11. API design
-12. Frontend architecture
-13. Deployment strategy
-14. MVP implementation order
-15. Future extensibility plan
-16. Technical debt warnings
-17. Suggested development roadmap
-
-Think deeply.
-Do not produce generic boilerplate.
-Act like a senior systems architect designing a personalized cognitive operating system.
+For architecture tasks: produce concrete designs, not hand-waving.
+For implementation tasks: produce working code that fits the existing stack.
+For debugging tasks: reason about the actual system, not a generic Flask app.
