@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import os
+import uuid
 
 # Blueprint groups all routes in this file under the "/api" prefix.
 # So @api_bp.route("/tasks") → GET /api/tasks, etc.
@@ -79,7 +80,7 @@ def list_tasks():
     return jsonify([dict(r) for r in rows])
 
 
-@api_bp.route("/tasks/<int:task_id>")
+@api_bp.route("/tasks/<task_id>")
 def get_task(task_id):
     row = get_db().execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
@@ -126,22 +127,23 @@ def upsert_task():
         fields = {k: v for k, v in data.items() if k in TASK_FIELDS}
         fields.setdefault("status", "inbox")
         fields.setdefault("priority", "medium")
-        # Mark tasks created via API so we can distinguish them from manual entries.
         fields.setdefault("source_type", "external")
+        new_id = str(uuid.uuid4())
+        fields["id"] = new_id
         fields["created_at"] = ts
         fields["updated_at"] = ts
 
         cols = ", ".join(fields)
         placeholders = ", ".join("?" * len(fields))
-        cur = db.execute(
+        db.execute(
             f"INSERT INTO tasks ({cols}) VALUES ({placeholders})",
             list(fields.values()),
         )
         db.commit()
-        return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone())), 201
+        return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id = ?", (new_id,)).fetchone())), 201
 
 
-@api_bp.route("/tasks/<int:task_id>", methods=["DELETE"])
+@api_bp.route("/tasks/<task_id>", methods=["DELETE"])
 def delete_task(task_id):
     db = get_db()
     if db.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
@@ -169,7 +171,7 @@ def list_projects():
     return jsonify([dict(r) for r in db.execute(query, params).fetchall()])
 
 
-@api_bp.route("/projects/<int:project_id>")
+@api_bp.route("/projects/<project_id>")
 def get_project(project_id):
     row = get_db().execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     if row is None:
@@ -210,20 +212,22 @@ def upsert_project():
         fields = {k: v for k, v in data.items() if k in PROJECT_FIELDS}
         fields.setdefault("status", "active")
         fields.setdefault("progress", 0)
+        new_id = str(uuid.uuid4())
+        fields["id"] = new_id
         fields["created_at"] = ts
         fields["updated_at"] = ts
 
         cols = ", ".join(fields)
         placeholders = ", ".join("?" * len(fields))
-        cur = db.execute(
+        db.execute(
             f"INSERT INTO projects ({cols}) VALUES ({placeholders})",
             list(fields.values()),
         )
         db.commit()
-        return jsonify(dict(db.execute("SELECT * FROM projects WHERE id = ?", (cur.lastrowid,)).fetchone())), 201
+        return jsonify(dict(db.execute("SELECT * FROM projects WHERE id = ?", (new_id,)).fetchone())), 201
 
 
-@api_bp.route("/projects/<int:project_id>", methods=["DELETE"])
+@api_bp.route("/projects/<project_id>", methods=["DELETE"])
 def delete_project(project_id):
     db = get_db()
     if db.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone() is None:

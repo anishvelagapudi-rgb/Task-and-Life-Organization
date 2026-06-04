@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 
 
@@ -10,7 +11,7 @@ class Project:
         progress=0,
         id=None,
     ):
-        self.id = id
+        self.id = id or str(uuid.uuid4())
         self.title = title
         self.description = description
         self.status = status        # active | paused | completed | archived
@@ -23,20 +24,20 @@ class Project:
         self.updated_at = datetime.now(timezone.utc)
         cursor = conn.cursor()
 
-        if self.id is None:
+        existing = cursor.execute("SELECT id FROM projects WHERE id = ?", (self.id,)).fetchone()
+        if existing is None:
             cursor.execute(
                 """
                 INSERT INTO projects (
-                    title, description, status,
+                    id, title, description, status,
                     progress, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self.title, self.description, self.status,
+                    self.id, self.title, self.description, self.status,
                     self.progress, self.created_at, self.updated_at,
                 ),
             )
-            self.id = cursor.lastrowid
         else:
             cursor.execute(
                 """

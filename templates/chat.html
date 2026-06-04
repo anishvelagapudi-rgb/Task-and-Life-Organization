@@ -1,0 +1,172 @@
+{% extends "layout.html" %}
+{% block title %}Chat{% endblock %}
+{% block content %}
+
+<style>
+  .chat-wrap {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .chat-header {
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  .chat-history {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 4px 0 16px;
+  }
+
+  .msg {
+    max-width: 84%;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .msg.user {
+    align-self: flex-end;
+    background: #1e2e45;
+    border: 1px solid #2a4060;
+    color: var(--text);
+  }
+
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .msg.thinking {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .chat-input-row {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  #chat-input {
+    flex: 1;
+    resize: none;
+    height: 44px;
+    line-height: 1.5;
+    padding: 10px 12px;
+    font-size: 14px;
+    border-radius: 6px;
+  }
+
+  #send-btn {
+    align-self: flex-end;
+    height: 44px;
+    padding: 0 20px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+</style>
+
+<div class="chat-wrap">
+  <div class="chat-header">
+    <h1 style="margin-bottom: 4px;">Chat</h1>
+    <p style="color: var(--muted); font-size: 13px;">Ask about your tasks, get recommendations, or think through what to work on next.</p>
+  </div>
+
+  <div class="chat-history" id="history"></div>
+
+  <div class="chat-input-row">
+    <textarea id="chat-input" placeholder="What should I work on right now?"></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+  const historyEl = document.getElementById('history');
+  const inputEl   = document.getElementById('chat-input');
+  const sendBtn   = document.getElementById('send-btn');
+
+  function appendMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.textContent = text;
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    return div;
+  }
+
+  // Load existing history from the server on page load
+  async function loadHistory() {
+    const res = await fetch('/chat/history');
+    const data = await res.json();
+    for (const msg of (data.messages || [])) {
+      appendMsg(msg.role, msg.content);
+    }
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    inputEl.value = '';
+    sendBtn.disabled = true;
+
+    appendMsg('user', text);
+    const thinking = appendMsg('thinking', 'Thinking…');
+
+    try {
+      const res = await fetch('/chat/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text }),
+      });
+
+      thinking.remove();
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || !data || data.error) {
+        const msg = data?.error || `Server error (${res.status})`;
+        appendMsg('assistant', 'Error: ' + msg);
+      } else {
+        appendMsg('assistant', data.reply);
+      }
+    } catch (err) {
+      thinking.remove();
+      appendMsg('assistant', 'Network error: ' + err.message);
+    }
+
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  loadHistory();
+  inputEl.focus();
+</script>
+
+{% endblock %}

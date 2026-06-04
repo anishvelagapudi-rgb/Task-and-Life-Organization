@@ -23,7 +23,7 @@ def init_db(app):
         db = get_db()
         db.executescript("""
             CREATE TABLE IF NOT EXISTS projects (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                id          TEXT PRIMARY KEY,
                 title       TEXT NOT NULL,
                 description TEXT,
                 status      TEXT DEFAULT 'active',
@@ -32,7 +32,7 @@ def init_db(app):
                 updated_at  TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS tasks (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                id               TEXT PRIMARY KEY,
                 parent_task_id   INTEGER,
                 title            TEXT NOT NULL,
                 description      TEXT,

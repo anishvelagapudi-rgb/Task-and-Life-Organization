@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime, timezone
 
 
@@ -23,7 +24,7 @@ class Task:
         task_notes=None,
         id=None,
     ):
-        self.id = id
+        self.id = id or str(uuid.uuid4())
         self.title = title
         self.description = description
         self.status = status          # inbox | active | blocked | done | archived
@@ -49,10 +50,12 @@ class Task:
         self.updated_at = datetime.now(timezone.utc)
         cursor = conn.cursor()
 
-        if self.id is None:
+        existing = cursor.execute("SELECT id FROM tasks WHERE id = ?", (self.id,)).fetchone()
+        if existing is None:
             cursor.execute(
                 """
                 INSERT INTO tasks (
+                    id,
                     title, description, status, priority,
                     due_date, completed_at, estimated_effort,
                     energy_type, fear_level, ambiguity_level,
@@ -61,6 +64,7 @@ class Task:
                     created_at, updated_at,
                     tags, dependencies, task_notes
                 ) VALUES (
+                    ?,
                     ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
@@ -71,6 +75,7 @@ class Task:
                 )
                 """,
                 (
+                    self.id,
                     self.title, self.description, self.status, self.priority,
                     self.due_date, self.completed_at, self.estimated_effort,
                     self.energy_type, self.fear_level, self.ambiguity_level,
@@ -80,7 +85,6 @@ class Task:
                     json.dumps(self.tags), json.dumps(self.dependencies), json.dumps(self.task_notes),
                 ),
             )
-            self.id = cursor.lastrowid
         else:
             cursor.execute(
                 """

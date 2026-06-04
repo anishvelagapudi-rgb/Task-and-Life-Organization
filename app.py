@@ -2,11 +2,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db
 from classes.Task import Task
 from classes.Project import Project
 from api import api_bp
+from ai_routes import ai_bp
+from services.ai.gemini_provider import GeminiProvider
+from services.ai.service import AIService
+from services.ai.budget import BudgetExceededError
 from authlib.integrations.flask_client import OAuth
 import uuid
 import os
@@ -15,8 +21,20 @@ app = Flask(__name__)
 app.secret_key = os.environ['FLASK_SECRET_KEY']
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
+# Rotate at 1 MB, keep 3 backups → errors.log, errors.log.1, errors.log.2
+_log_handler = RotatingFileHandler("errors.log", maxBytes=1_000_000, backupCount=3)
+_log_handler.setLevel(logging.ERROR)
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s  %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+))
+logger = logging.getLogger("app")
+logger.setLevel(logging.ERROR)
+logger.addHandler(_log_handler)
+
 # Register the API blueprint — wires in all /api/* routes from api.py
 app.register_blueprint(api_bp)
+# Register the AI blueprint — /api/ai/* routes
+app.register_blueprint(ai_bp)
 
 # OAUTH Library SETUP (authlib)
 oauth = OAuth(app)
@@ -34,6 +52,13 @@ google = oauth.register(
 # Resets on server restart.
 VALID_SESSIONS = {}
 OWNER_EMAIL = os.environ['OWNER_EMAIL']
+
+# In-memory chat history. Resets on server restart.
+# List of {"role": "user"|"assistant", "content": "..."}
+CHAT_HISTORY = []
+
+# Shared AI service instance — initialized once after .env is loaded.
+_ai_service = AIService(GeminiProvider())
 
 
 def get_current_user():
@@ -156,7 +181,7 @@ def create_task():
     return redirect(url_for("get_tasks"))
 
 
-@app.route("/tasks/<int:task_id>")
+@app.route("/tasks/<task_id>")
 def get_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -208,7 +233,7 @@ def get_task(task_id):
                            projects=all_projects())
 
 
-@app.route("/tasks/<int:task_id>", methods=["POST"])
+@app.route("/tasks/<task_id>", methods=["POST"])
 def update_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -252,7 +277,7 @@ def update_task(task_id):
     return redirect(url_for('get_task', task_id=task_id))
 
 
-@app.route("/tasks/<int:task_id>/complete", methods=["POST"])
+@app.route("/tasks/<task_id>/complete", methods=["POST"])
 def complete_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -286,7 +311,7 @@ def complete_task(task_id):
     return redirect(request.referrer or url_for('get_tasks'))
 
 
-@app.route("/tasks/<int:task_id>/delete")
+@app.route("/tasks/<task_id>/delete")
 def delete_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -321,7 +346,7 @@ def create_project():
     return redirect(url_for("get_projects"))
 
 
-@app.route("/projects/<int:project_id>")
+@app.route("/projects/<project_id>")
 def get_project(project_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -335,7 +360,7 @@ def get_project(project_id):
                            tasks=[dict(t) for t in tasks])
 
 
-@app.route("/projects/<int:project_id>", methods=["POST"])
+@app.route("/projects/<project_id>", methods=["POST"])
 def update_project(project_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -355,7 +380,46 @@ def update_project(project_id):
     return redirect("/projects")
 
 
-@app.route("/projects/<int:project_id>/delete")
+# ─── chat ─────────────────────────────────────────────────────────────────────
+
+@app.route("/chat")
+def chat_page():
+    if not get_current_user():
+        return redirect(url_for('login'))
+    return render_template("chat.html")
+
+
+@app.route("/chat/history")
+def chat_history():
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    return json.dumps({"messages": CHAT_HISTORY}), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/chat/message", methods=["POST"])
+def chat_message():
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    data = request.get_json(force=True) or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return json.dumps({"error": "content is required"}), 400, {"Content-Type": "application/json"}
+    try:
+        reply = _ai_service.chat(get_db(), [{"role": "user", "content": content}])
+    except BudgetExceededError as e:
+        # Hard stop — do NOT call explain_error (that would make another API call).
+        # Log it loudly so it's obvious a human needs to look at the server.
+        logger.error("BUDGET EXCEEDED — AI disabled until server restart: %s", e)
+        reply = str(e)
+    except Exception as e:
+        logger.exception("chat_message failed | user_input=%r", content)
+        reply = _ai_service.explain_error(get_db(), content, str(e))
+    CHAT_HISTORY.append({"role": "user", "content": content})
+    CHAT_HISTORY.append({"role": "assistant", "content": reply})
+    return json.dumps({"reply": reply}), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/projects/<project_id>/delete")
 def delete_project(project_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -363,6 +427,13 @@ def delete_project(project_id):
     db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     db.commit()
     return redirect(url_for("get_projects"))
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.exception("Unhandled exception | %s %s", request.method, request.path)
+    # Re-raise so Flask's normal error handling (debug page / 500) still works
+    raise e
 
 
 if __name__ == "__main__":
