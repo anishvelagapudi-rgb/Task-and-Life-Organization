@@ -1,5 +1,5 @@
 # Personal Execution OS — Status Report
-_Last updated: 2026-06-04_
+_Last updated: 2026-06-12_
 
 ---
 
@@ -80,7 +80,10 @@ Two tables live in SQLite:
 
 ### Definitely Still Needed
 
-**1. AI chat history persistence**
+**1. RAG Pipeline (knowledge layer)**
+The vault + embedding + retrieval system described in the roadmap. This is the highest-priority unbuilt feature. The implementation is being AI-generated as the first pass — all the design decisions are locked (ChromaDB, `text-embedding-004`, per-folder collections, ~500-token chunks, watchdog file watcher). Once working and tested, each component (chunker, embedder, vector store, retriever, injector) is a candidate for Ship of Theseus replacement.
+
+**2. AI chat history persistence**
 Chat history lives in a Python list (`CHAT_HISTORY` in `app.py`). It resets every time the server restarts. The AI loses all conversation context. This is the most annoying current limitation. A `chat_messages` table in SQLite would fix it.
 
 **2. Inbox / fast-capture interface**
@@ -99,9 +102,6 @@ The roadmap specifies MySQL + SQLAlchemy + Flask-Migrate. The current SQLite + r
 
 **6. External calendar imports (Google Calendar, Canvas ICS)**
 The original spec includes a full normalization pipeline for pulling in external deadlines. This is a real behavioral problem (scattered obligations) but also a non-trivial build. Worth doing if your deadlines live in Google Calendar or Canvas and you want them surfaced in the dashboard automatically. Skip it if you're fine manually entering them.
-
-**7. Obsidian vault integration**
-Originally described as the "knowledge layer" — the idea was that AI could pull context from your notes when answering questions. This would make the AI much more useful for open-ended planning questions. However it adds complexity (vault path config, markdown parsing, file watching) and requires Obsidian to be running on the same machine as the server. Unclear if the value is there right now.
 
 ### Dropped or Already Solved Differently
 
@@ -124,6 +124,6 @@ All solved with JSON columns on tasks. Acceptable for single-user; a relational 
 1. **SQLite or MySQL?** Single-user load makes SQLite fine forever. MySQL only makes sense if deployment to Render requires it or you want proper migrations tooling.
 2. **Should chat history persist to the DB?** Almost certainly yes — the in-memory approach means the AI has no memory between sessions.
 3. **External imports: yes or no?** If your deadlines are scattered across Google Calendar and Canvas, this is high-value. If you're fine entering them manually, skip it.
-4. **Obsidian integration: yes or no?** High potential value for AI-assisted planning, but adds real complexity. Evaluate after the core app is deployed and in daily use.
+4. ~~**Obsidian integration: yes or no?**~~ **Decided: no.** A custom vault at `/data/vault/` with the defined folder structure replaces this. No dependency on Obsidian being installed or running.
 5. **Project fields**: Is `goal`, `risk_level`, `target_date` worth adding to the project schema, or is the current minimal schema enough?
 6. **Session budget**: $0.05 per server restart is very tight. What should the real limit be once this is in daily use?

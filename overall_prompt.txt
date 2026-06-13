@@ -9,6 +9,8 @@ This is a private, self-hosted cognitive infrastructure system. Its purpose is t
 
 The system has ONE user. Every design decision should optimize for that user's experience, not for generalizability.
 
+This project also serves as a learning platform. The user's approach is: build the full system quickly with AI assistance, then replace each component one at a time with a version they wrote themselves (the Ship of Theseus method). A replacement is only valid if the app retains full functionality and all tests pass. Write code with clean, narrow interfaces between components so each one can be swapped independently. The RAG pipeline is the primary target for this.
+
 ====================================================
 WHAT THIS SYSTEM ACTUALLY IS
 ====================================================
@@ -121,6 +123,13 @@ These are the next major capabilities to implement, roughly in order:
 ----------------------------------------------------
 1. RAG LAYER (HIGHEST PRIORITY)
 ----------------------------------------------------
+
+The initial implementation of this layer is AI-generated. All design
+decisions below are final and locked. Once built and tested, the user
+will replace each component (chunker, embedder, vector store, retriever,
+injector) one at a time with their own implementation — the Ship of
+Theseus method. Write each component with a narrow, explicit interface
+so it can be swapped without touching anything else.
 
 This is the foundation. Build this before anything else.
 
@@ -422,6 +431,10 @@ ENGINEERING PRINCIPLES
 7. The file watcher must be fault-tolerant. A crashed watcher
    should not crash the Flask app.
 8. All secrets in .env. Nothing hardcoded.
+9. Clean component boundaries are non-negotiable. Each RAG component
+   (chunker, embedder, vector store, retriever, injector) must have a
+   narrow, explicit interface with no cross-component assumptions. This
+   is what makes the Ship of Theseus replacements possible.
 
 ====================================================
 THE ONE SUCCESS CONDITION

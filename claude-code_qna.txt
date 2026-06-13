@@ -1,0 +1,76 @@
+RAG PIPELINE — OPEN QUESTIONS
+==============================
+Fill in your answers below each question. Claude Code will read this file
+before writing the final RAG_implementation.txt.
+
+----------------------------------------------------------------------
+Q1. SEARCH UI
+----------------------------------------------------------------------
+Beyond the AI's search_vault tool (already specced in overall_prompt.txt),
+do you want a standalone /search or /vault page where you can browse/search
+notes directly in the browser — no chat involved?
+
+ANSWER: Not really. In theory, I should just be able to ask the chatbot to give me the list of sources, and it should give me a list of sources.
+
+
+----------------------------------------------------------------------
+Q2. "HIGH WEIGHTING" MECHANISM
+----------------------------------------------------------------------
+When vault data should be "highly weighted," which do you mean technically:
+  (a) Prompt instruction: "Prefer your personal vault over general knowledge"
+  (b) Similarity threshold: only inject chunks above a cutoff (e.g., cosine sim < 0.7 = discard)
+  (c) Both
+
+ANSWER:
+
+
+----------------------------------------------------------------------
+Q3. FALLBACK BEHAVIOR
+----------------------------------------------------------------------
+When the vault has nothing relevant (no chunks above threshold), should the AI:
+  (a) Explicitly say "I don't have notes on this, but based on general knowledge..."
+  (b) Silently answer from general knowledge (no mention of vault miss)
+  (c) Ask you if you want it to search more broadly
+
+ANSWER:
+
+
+----------------------------------------------------------------------
+Q4. PASSIVE RETRIEVAL SCOPE
+----------------------------------------------------------------------
+Should every chat message trigger vault retrieval — including simple task
+commands like "mark X as done" — or should there be a lightweight check
+first (skip RAG if message looks like a pure task mutation)?
+
+ANSWER:
+
+
+----------------------------------------------------------------------
+Q5. SIMILARITY THRESHOLD
+----------------------------------------------------------------------
+Pure top-k (always return k most similar chunks regardless of score),
+or apply a minimum cutoff and return fewer/zero chunks if nothing is
+relevant enough?
+
+ANSWER:
+
+
+----------------------------------------------------------------------
+Q6. HYBRID SEARCH
+----------------------------------------------------------------------
+ChromaDB supports combining vector similarity with keyword/BM25 search.
+Do you want pure vector-only, or hybrid? Hybrid is more accurate for
+specific names/titles but adds complexity.
+
+ANSWER:
+
+
+----------------------------------------------------------------------
+Q7. VAULT STATE NOW
+----------------------------------------------------------------------
+Is /data/vault/ currently empty (building from scratch) or do you already
+have notes in there? This affects whether we spec an initial bulk-index
+step or just the incremental file watcher.
+
+ANSWER:
+
