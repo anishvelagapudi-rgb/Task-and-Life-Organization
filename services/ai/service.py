@@ -1,8 +1,13 @@
 import json
+import logging
+import os
+import re
 import uuid
 from datetime import datetime, timezone
+
 from .provider import AIProvider
 
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """You are a personal execution assistant for a single user.
 
@@ -24,6 +29,25 @@ Recommend tasks that maximize: urgency + actionability + momentum - resistance.
 - Deprioritize tasks with high fear unless they're also high urgency
 - Match energy type to what the user is likely capable of right now
 
+KNOWLEDGE BASE (VAULT):
+You have access to the user's personal vault — markdown notes on classes, people, projects,
+goals, journals, and more. When relevant notes are retrieved, they appear as VAULT CONTEXT below.
+
+Rules for vault usage:
+- Prefer vault content over general knowledge when answering questions about the user's life/work.
+- Cite the source file when using vault content (e.g. "According to classes/cs101.md...").
+- If no vault context was retrieved and you're using general knowledge, you MUST literally
+  append the exact characters "(GK)" to the end of your response — no exceptions. Then on
+  a new line, ask if the user wants you to search the vault more broadly. Example ending:
+  "...the answer is 3,422°C. (GK)\n\nWant me to search your vault for anything related?"
+- Retrieved chunks may not always be perfectly relevant — use your judgment about whether
+  they actually apply to the question.
+- Notes marked [AI-GENERATED, UNREVIEWED] may be inaccurate — always surface uncertainty
+  when citing them.
+- Use search_vault when the user asks about notes or when you want to look something up explicitly.
+- Use create_note to save important insights to the vault when the user asks or when you spot
+  a clear knowledge gap worth documenting.
+
 IMPORTANT RULES:
 - Do exactly what the user asks — no more. Do not create extra tasks, subtasks, or related items unless explicitly requested.
 - Only claim an action was taken after a tool call confirms it succeeded.
@@ -31,7 +55,6 @@ IMPORTANT RULES:
 - Never volunteer information, suggestions, or follow-up actions unless the user asks.
 """
 
-# Tools the model can call. Kept here so provider implementations stay generic.
 TOOLS = [
     {
         "type": "function",
@@ -124,6 +147,70 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_vault",
+            "description": (
+                "Search the personal knowledge vault for notes on any topic. "
+                "Returns relevant text chunks with source citations. "
+                "Use when the user asks about notes, past information, or anything the vault might contain."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language search query",
+                    },
+                    "collection": {
+                        "type": "string",
+                        "description": (
+                            "Scope to a specific collection: "
+                            "classes | people | projects | journal | goals | reference | ai_generated | meta"
+                        ),
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Number of results (1-10, default 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_note",
+            "description": (
+                "Create a new markdown note in the AI-generated vault. "
+                "Use when the user explicitly asks to save a note, or when you identify a "
+                "knowledge gap worth documenting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Filename without extension, use kebab-case (e.g. 'study-plan-cs101')",
+                    },
+                    "title": {"type": "string", "description": "Human-readable note title"},
+                    "topic": {"type": "string", "description": "Topic or subject of the note"},
+                    "content": {
+                        "type": "string",
+                        "description": "Markdown content (without frontmatter)",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of tags",
+                    },
+                },
+                "required": ["filename", "title", "topic", "content"],
+            },
+        },
+    },
 ]
 
 _TASK_WRITE_FIELDS = {
@@ -131,13 +218,32 @@ _TASK_WRITE_FIELDS = {
     "due_date", "project_id", "fear_level", "ambiguity_level", "estimated_effort",
 }
 
+# Passive RAG skip: patterns that signal a pure task/project mutation command
+_MUTATION_START = re.compile(
+    r"^\s*(mark|complete|delete|remove|update|set|change|rename|archive|"
+    r"assign|unassign|create\s+(a\s+)?(new\s+)?(task|project)|"
+    r"add\s+(a\s+)?(new\s+)?(task|project))\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_WORDS = re.compile(
+    r"\b(what|which|who|when|where|why|how|tell|explain|describe|summarize|"
+    r"know|notes?|vault|remember|recall|find|search|show me|list all|think|feel)\b",
+    re.IGNORECASE,
+)
+
+
+def _should_skip_rag(message: str) -> bool:
+    """True if message is clearly a task/project CRUD command with no knowledge component."""
+    if _KNOWLEDGE_WORDS.search(message):
+        return False
+    return bool(_MUTATION_START.match(message))
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _execute_tool(db, name: str, args: dict) -> dict:
-    """Run a tool call against the DB and return a result dict the model can read."""
     if name == "create_project":
         new_id = str(uuid.uuid4())
         db.execute(
@@ -184,6 +290,79 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", [*updates.values(), task_id])
         db.commit()
         return {"success": True, "id": task_id}
+
+    if name == "search_vault":
+        try:
+            from services.rag.retriever import retrieve
+            from services.rag.injector import build_context
+            query = args["query"]
+            col = args.get("collection")
+            k = min(int(args.get("k", 5)), 10)
+            results = retrieve(query, k=k, collections=[col] if col else None)
+            if not results:
+                return {"found": False, "message": "No relevant notes found in the vault."}
+            return {
+                "found": True,
+                "chunks": [
+                    {
+                        "source": c.source_path.split("/data/vault/", 1)[-1]
+                        if "/data/vault/" in c.source_path
+                        else c.source_path,
+                        "collection": c.collection,
+                        "heading": c.heading,
+                        "text": c.text[:1200],
+                        "ai_generated": c.ai_generated,
+                        "reviewed": c.reviewed,
+                    }
+                    for c in results
+                ],
+            }
+        except Exception as e:
+            logger.exception("search_vault tool failed")
+            return {"found": False, "error": str(e)}
+
+    if name == "create_note":
+        try:
+            import frontmatter as fm
+            from services.rag.indexer import VAULT_ROOT, index_file
+
+            slug = re.sub(r"[^\w\-]", "-", args["filename"].lower().strip()).strip("-")
+            if not slug:
+                slug = "note"
+            filename = slug + ".md"
+            path = os.path.join(VAULT_ROOT, "ai_generated", filename)
+
+            # Never overwrite a user note; ai_generated/ is AI-only territory
+            if os.path.exists(path):
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                path = os.path.join(VAULT_ROOT, "ai_generated", f"{slug}-{ts}.md")
+
+            meta = {
+                "type": "ai_generated",
+                "title": args["title"],
+                "topic": args["topic"],
+                "tags": args.get("tags", []),
+                "ai_generated": True,
+                "reviewed": False,
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            post = fm.Post(args["content"], **meta)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(fm.dumps(post))
+
+            # Index immediately so it's searchable in this same session
+            try:
+                index_file(path)
+            except Exception:
+                logger.warning("Immediate index of created note failed; watcher will retry")
+
+            rel = path.split("/data/vault/", 1)[-1] if "/data/vault/" in path else path
+            return {"success": True, "path": rel}
+        except Exception as e:
+            logger.exception("create_note tool failed")
+            return {"success": False, "error": str(e)}
 
     return {"success": False, "error": f"Unknown tool: {name}"}
 
@@ -261,10 +440,6 @@ Respond with raw JSON only — no markdown, no extra text."""
             return {"recommendations": [], "insight": raw}
 
     def explain_error(self, db, user_content: str, error: str) -> str:
-        """
-        Called when chat() fails. Makes a plain (no-tool) call so the model can
-        explain what likely went wrong and ask the user for clarification.
-        """
         projects = db.execute("SELECT id, title, status FROM projects ORDER BY title").fetchall()
         project_lines = "\n".join(f"  [{p['id']}] {p['title']} ({p['status']})" for p in projects) or "  None"
 
@@ -299,7 +474,7 @@ CURRENT PROJECTS:
         project_lines = "\n".join(f"  [{p['id']}] {p['title']} ({p['status']})" for p in projects) or "  None"
 
         task_block = _serialize_tasks(tasks)
-        system = f"""{_SYSTEM_PROMPT}
+        base_system = f"""{_SYSTEM_PROMPT}
 
 CURRENT PROJECTS:
 {project_lines}
@@ -307,7 +482,30 @@ CURRENT PROJECTS:
 CURRENT TASKS:
 {task_block}"""
 
-        # Agentic loop: keep executing tool calls until the model stops calling tools.
+        # Passive RAG: retrieve vault context unless this is a pure task mutation.
+        # base_system is saved separately so that if a tool call is made in round 1,
+        # subsequent rounds use base_system (no injected context) to avoid the
+        # Gemini bug where system-context + tool-result together produce empty output.
+        system = base_system
+        last_user = next(
+            (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+        )
+        if last_user and not _should_skip_rag(last_user):
+            try:
+                from services.rag.retriever import retrieve
+                from services.rag.injector import build_context
+                chunks = retrieve(last_user, k=5)
+                ctx = build_context(chunks)
+                if ctx:
+                    system = (
+                        f"{base_system}\n\n{ctx}\n\n"
+                        "[Note: vault context already retrieved above — "
+                        "answer directly from it rather than calling search_vault.]"
+                    )
+            except Exception:
+                logger.exception("Passive RAG retrieval failed")
+
+        # Agentic loop: keep executing tool calls until the model stops.
         # Cap at 5 rounds to prevent runaway chains.
         internal = list(messages)
         for _ in range(5):
@@ -316,8 +514,31 @@ CURRENT TASKS:
             if not tool_calls:
                 return reply_text or ""
 
-            # Add the assistant's tool-calling turn to the internal history so the
-            # next call has full context of what was invoked and why.
+            # search_vault tool responses cause Gemini 2.5 Flash Lite to emit 0 output
+            # tokens in the follow-up round (confirmed via costs.log: out=0 every time).
+            # Bypass the tool-response format entirely: perform the retrieval here,
+            # inject the results via the system prompt, and answer with a plain chat()
+            # call (no tools) — the same injection path used by passive RAG.
+            if len(tool_calls) == 1 and tool_calls[0]["name"] == "search_vault":
+                tc = tool_calls[0]
+                try:
+                    from services.rag.retriever import retrieve
+                    from services.rag.injector import build_context
+                    query = tc["arguments"]["query"]
+                    col = tc["arguments"].get("collection")
+                    k_val = min(int(tc["arguments"].get("k", 5)), 10)
+                    chunks = retrieve(query, k=k_val, collections=[col] if col else None)
+                    ctx = build_context(chunks)
+                except Exception:
+                    logger.exception("search_vault injection fallback failed")
+                    ctx = ""
+                fresh_system = f"{base_system}\n\n{ctx}" if ctx else base_system
+                return self.provider.chat(fresh_system, messages) or ""
+
+            # Drop passive RAG context for subsequent rounds — tool results already
+            # provide the context and the combined injection causes empty Gemini responses.
+            system = base_system
+
             internal.append({
                 "role": "assistant",
                 "content": reply_text or None,
@@ -342,5 +563,4 @@ CURRENT TASKS:
                     "content": json.dumps(result),
                 })
 
-        # Fallback if we somehow hit the round limit — ask for a plain text summary
-        return self.provider.chat(system, internal) or ""
+        return self.provider.chat(base_system, internal) or ""

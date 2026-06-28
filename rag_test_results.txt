@@ -1,0 +1,186 @@
+RAG TEST RESULTS — 2026-06-27 01:54:25
+========================================================================
+
+
+══ COMPONENT TESTS (no AI calls) ══════════════════════════════════════
+
+  Running: test_chunker_heading_split …
+
+  Running: test_chunker_frontmatter …
+
+  Running: test_chunker_size_limit …
+
+  Running: test_indexer_dynamic_collection …
+
+  Running: test_indexer_runs …
+
+  Running: test_indexer_idempotency …
+
+  Running: test_indexer_delete …
+
+  Running: test_retrieval_relevant …
+
+  Running: test_retrieval_irrelevant …
+
+  Running: test_retrieval_keyword_boost …
+
+  Running: test_retrieval_cross_collection …
+
+  Running: test_retrieval_scoped …
+
+  Running: test_injector_structure …
+
+  Running: test_injector_empty …
+
+  Running: test_skip_rag_heuristic …
+
+
+══ INTEGRATION TESTS (Gemini API calls) ════════════════════════════════
+
+  Running: test_passive_rag …
+
+  Running: test_gk_fallback …
+
+  Running: test_search_vault_tool …
+
+  Running: test_create_note_tool …
+
+
+── Cleanup ───────────────────────────────────────────────────────────────
+
+  Removed 4 test file(s) from vault and ChromaDB.
+
+════════════════════════════════════════════════════════════════════════
+DETAILED RESULTS
+════════════════════════════════════════════════════════════════════════
+
+✓ [PASS]  #01  Chunker — splits by headings
+  Metric      : Number of chunks produced from a 2-heading note
+  Result      : 2 chunk(s), headings: ['# Quarks and Gluons', '# Color Confinement']
+  Explanation : A note with 2 H1 headings should produce at least 2 chunks. Correct.
+
+✓ [PASS]  #02  Chunker — frontmatter parsed correctly
+  Metric      : tags, ai_generated, reviewed fields on first chunk
+  Result      : tags=['physics', 'QCD', 'quarks']  ai_generated=False  reviewed=True
+  Explanation : Frontmatter YAML should be parsed and attached to each chunk's metadata. All fields correct.
+
+✓ [PASS]  #03  Chunker — no chunk exceeds size limit
+  Metric      : Max allowed: 2000 chars. Oversized chunks found:
+  Result      : 0 oversized chunk(s). Sizes: [197, 333]
+  Explanation : Long sections should be split by paragraph to stay under the token budget. All chunks within limit.
+
+✓ [PASS]  #04  Indexer — dynamic collection mapping
+  Metric      : Any vault subfolder should map to itself as a collection name
+  Result      : All OK
+  Explanation : No static allowlist — any new section the user creates should auto-route. Correct for inbox, school, and a custom folder.
+
+✓ [PASS]  #05  Indexer — index_file() completes without error
+  Metric      : index_file() called on a valid .md file
+  Result      : Success
+  Explanation : index_file() should chunk the file, embed it, and write to ChromaDB. Completed cleanly.
+
+✓ [PASS]  #06  Indexer — re-indexing same file is idempotent (no duplicates)
+  Metric      : Chunk count for source_path after 1st index == count after 2nd index
+  Result      : After 1st index: 2 chunk(s)  |  After 2nd index: 2 chunk(s)
+  Explanation : The file watcher fires on every save, so indexing must be safe to call repeatedly. upsert() with stable IDs (md5(path)_N) should overwrite, not accumulate. Chunk count stable — upsert working correctly.
+
+✓ [PASS]  #07  Indexer — delete_by_source removes chunks from retrieval
+  Metric      : Note retrievable before deletion, absent after deletion
+  Result      : Found before: True  |  Found after: False
+  Explanation : Deleting a vault file should remove its chunks from ChromaDB so stale content is never returned. Deletion confirmed — note no longer retrievable.
+
+✓ [PASS]  #08  Retrieval — relevant query surfaces correct note
+  Metric      : Does '_test_qcd.md' appear in top-5 results for a matching query?
+  Result      : Top sources: ['_test_qcd.md', '_test_qcd.md']  |  top distance: 0.0997
+  Explanation : A query about QCD/quarks should retrieve the QCD test note. Found it at distance 0.0997 (lower=more similar, cosine).
+
+✓ [PASS]  #09  Retrieval — irrelevant query does not surface QCD note at top
+  Metric      : Is '_test_qcd.md' absent from top-3 results for an unrelated query?
+  Result      : Top sources: []
+  Explanation : A note about quarks should not rank highly for a query about morning routines. Correct — QCD note absent from top-3.
+
+✓ [PASS]  #10  Retrieval — keyword hybrid re-ranking
+  Metric      : Does a query with exact keywords from the note rank it #1?
+  Result      : Top result: _test_qcd.md  dist=0.1250
+  Explanation : Keyword overlap should boost the cosine distance score, moving the exact-match note to position #1. Keyword boost working.
+
+✓ [PASS]  #11  Retrieval — cross-collection (person note found)
+  Metric      : Does a query about an advisor surface the people/ collection note?
+  Result      : Top sources: ['_test_person.md']
+  Explanation : Retrieval searches all ChromaDB collections by default, not just 'classes'. People note surfaced correctly.
+
+✓ [PASS]  #12  Retrieval — scoped to single collection
+  Metric      : When collections=['classes'] is passed, do all results come from 'classes'?
+  Result      : Collections in results: ['classes']
+  Explanation : Passing collections=['classes'] should restrict search to that collection only. All results from 'classes'.
+
+✓ [PASS]  #13  Injector — context block structure
+  Metric      : Does build_context() produce a header, numbered citations, and source paths?
+  Result      : has_header=True  has_numbers=True  has_source=True
+  Explanation : The injected block must be readable by the AI: titled, numbered, and sourced. All structural elements present.
+
+✓ [PASS]  #14  Injector — empty input produces empty string
+  Metric      : build_context([]) == ''
+  Result      : ''
+  Explanation : When no chunks are retrieved, nothing should be injected into the system prompt. Correct.
+
+✓ [PASS]  #15  Skip-RAG heuristic — 16 classification cases
+  Metric      : How many messages are correctly classified as skip=True/False?
+  Result      : 16/16 correct
+  Explanation : Pure task mutations should skip vault retrieval to save tokens. Knowledge questions must not be skipped. All 16 cases classified correctly.
+
+✓ [PASS]  #16  Passive RAG — AI answers using vault note content
+  Metric      : Does the AI reply contain ≥2 terms from the QCD note?
+  Result      : Terms found: ['quark', 'qcd', 'chromodynamics']
+Citation present: True
+Full reply:
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force, and quarks carry color charge: red, green, or blue. (GK)
+
+Want me to search your vault for anything related?
+  Explanation : The QCD note should be automatically retrieved and injected before the AI call. AI used vault content — found terms: ['quark', 'qcd', 'chromodynamics'].
+
+✓ [PASS]  #17  (GK) fallback — AI labels general knowledge answers
+  Metric      : Does the reply contain the literal string '(GK)'?
+  Result      : (GK) present: True
+Full reply:
+The boiling point of tungsten is approximately 5,930°C. (GK)
+
+Want me to search your vault for anything related?
+  Explanation : When answering from general knowledge (nothing in vault), the AI must append '(GK)'. Correct — (GK) marker present.
+
+✓ [PASS]  #18  search_vault tool — active retrieval returns vault content
+  Metric      : Does the AI reply (via search_vault tool) contain terms from the QCD note?
+  Result      : Terms found: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics']
+Full reply:
+[1] classes/_test_qcd.md § # Color Confinement
+# Color Confinement
+
+…Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+
+Color confinement means quarks cannot exist in isolation — only
+color-neutral combinations form hadrons such as protons and neutrons.
+---
+
+[2] classes/_test_qcd.md § # Quarks and Gluons
+# Quarks and Gluons
+
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+---
+  Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries ChromaDB and returns chunks. Tool returned vault content — terms: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics'].
+
+✓ [PASS]  #19  create_note tool — AI writes a file to vault/ai_generated/
+  Metric      : File created + has reviewed:false + has ai_generated:true in frontmatter
+  Result      : New files: {'rag-pipeline-overview.md'}
+reviewed:false present: True
+ai_generated:true present: True
+AI reply:
+I have saved the note about RAG pipelines.
+  Explanation : The AI should call create_note, which writes a .md file with safety frontmatter. File created correctly with proper flags.
+
+════════════════════════════════════════════════════════════════════════
+SUMMARY: 19/19 passed   0 failed
+════════════════════════════════════════════════════════════════════════

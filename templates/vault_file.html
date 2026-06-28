@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+{% block title %}{{ filepath }} — Vault{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+  <a href="/vault" class="btn-ghost btn btn-sm">← Vault</a>
+  <span style="font-family:monospace;font-size:13px;color:var(--muted);">{{ filepath }}</span>
+</div>
+<div class="card" style="padding:0;">
+  <pre style="padding:20px;font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;margin:0;color:var(--text);">{{ content }}</pre>
+</div>
+{% endblock %}

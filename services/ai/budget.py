@@ -17,11 +17,14 @@ HOW IT WORKS:
   touching the API. A server restart is required to re-enable AI — that's the
   "human in the loop" checkpoint.
 
-PRICING (Gemini 2.5 Flash Lite — verify at https://ai.google.dev/pricing, rates below may be wrong):
-  Input:  $0.10 / 1M tokens  ← unconfirmed, check before relying on cost estimates
-  Output: $0.40 / 1M tokens  ← unconfirmed, check before relying on cost estimates
+PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
+  Gemini 2.5 Flash Lite — Input:  $0.10 / 1M tokens  ← unconfirmed
+  Gemini 2.5 Flash Lite — Output: $0.40 / 1M tokens  ← unconfirmed
+  gemini-embedding-001  — Input:  $0.025 / 1M tokens  ← unconfirmed (estimated from text-embedding-004)
+  Embedding responses carry no usage_metadata, so token count is estimated at 1 token per 4 chars.
 
 SESSION_LIMIT defaults to $0.05 but can be overridden via AI_SESSION_BUDGET in .env.
+The limit applies to all API calls combined — generative AND embedding.
 """
 
 import logging
@@ -32,8 +35,9 @@ from logging.handlers import RotatingFileHandler
 SESSION_LIMIT: float = float(os.environ.get("AI_SESSION_BUDGET", "0.05"))
 
 # Dollar cost per token (input and output are priced differently)
-_INPUT_RATE  = 0.10 / 1_000_000   # per input token  — update after verifying at ai.google.dev/pricing
-_OUTPUT_RATE = 0.40 / 1_000_000   # per output token — update after verifying at ai.google.dev/pricing
+_INPUT_RATE  = 0.10  / 1_000_000   # per input token  — update after verifying at ai.google.dev/pricing
+_OUTPUT_RATE = 0.40  / 1_000_000   # per output token — update after verifying at ai.google.dev/pricing
+_EMBED_RATE  = 0.025 / 1_000_000   # per embedding token (estimated) — update after verifying
 
 # Running total and kill-switch — module-level so they survive across requests
 # but reset when the server process restarts
@@ -94,6 +98,43 @@ def record_usage(input_tokens: int, output_tokens: int, model: str) -> float:
     _cost_log.info(
         "model=%-30s  in=%6d  out=%6d  call=$%.5f  total=$%.5f  limit=$%.2f",
         model, input_tokens, output_tokens, call_cost, _cumulative_cost, SESSION_LIMIT,
+    )
+
+    if _cumulative_cost >= SESSION_LIMIT:
+        _budget_blown = True
+        raise BudgetExceededError(
+            f"Session AI budget of ${SESSION_LIMIT:.2f} reached "
+            f"(spent ${_cumulative_cost:.4f}). "
+            "AI is disabled until the server is restarted."
+        )
+
+    return call_cost
+
+
+def record_embedding_usage(char_count: int, model: str) -> float:
+    """
+    Called by the embedder after every embed_content API call.
+
+    The Gemini embedding API returns no usage_metadata, so we estimate token
+    count from character count at 1 token per 4 characters — the standard
+    approximation. Both generative and embedding costs feed the same running
+    total and the same $SESSION_LIMIT kill-switch.
+    """
+    global _cumulative_cost, _budget_blown
+
+    if _budget_blown:
+        raise BudgetExceededError(
+            f"Session AI budget of ${SESSION_LIMIT:.2f} already exceeded. "
+            "AI is disabled until the server is restarted."
+        )
+
+    estimated_tokens = max(1, char_count // 4)
+    call_cost = estimated_tokens * _EMBED_RATE
+    _cumulative_cost += call_cost
+
+    _cost_log.info(
+        "model=%-30s  chars=%6d  ~tokens=%5d  call=$%.6f  total=$%.5f  limit=$%.2f  [embed]",
+        model, char_count, estimated_tokens, call_cost, _cumulative_cost, SESSION_LIMIT,
     )
 
     if _cumulative_cost >= SESSION_LIMIT:

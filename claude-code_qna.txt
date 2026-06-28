@@ -21,7 +21,7 @@ When vault data should be "highly weighted," which do you mean technically:
   (b) Similarity threshold: only inject chunks above a cutoff (e.g., cosine sim < 0.7 = discard)
   (c) Both
 
-ANSWER:
+ANSWER: C. Both
 
 
 ----------------------------------------------------------------------
@@ -32,7 +32,7 @@ When the vault has nothing relevant (no chunks above threshold), should the AI:
   (b) Silently answer from general knowledge (no mention of vault miss)
   (c) Ask you if you want it to search more broadly
 
-ANSWER:
+ANSWER: A, but also ask if you want to search more broadly. Just don't do B. The user should always be aware if general knowledge is being used. It doesnt need to be the full statement as in B, but maybe like a "(GK)" just added to the end of whatever output chunk is given.
 
 
 ----------------------------------------------------------------------
@@ -42,7 +42,7 @@ Should every chat message trigger vault retrieval — including simple task
 commands like "mark X as done" — or should there be a lightweight check
 first (skip RAG if message looks like a pure task mutation)?
 
-ANSWER:
+ANSWER: No. Do the lightweight check.
 
 
 ----------------------------------------------------------------------
@@ -52,8 +52,7 @@ Pure top-k (always return k most similar chunks regardless of score),
 or apply a minimum cutoff and return fewer/zero chunks if nothing is
 relevant enough?
 
-ANSWER:
-
+ANSWER: Return the pure top-k chunks and add a check in the system prompt. Tell the model that it is entirely possible that the chunks it aren't completely relevant.
 
 ----------------------------------------------------------------------
 Q6. HYBRID SEARCH
@@ -62,7 +61,7 @@ ChromaDB supports combining vector similarity with keyword/BM25 search.
 Do you want pure vector-only, or hybrid? Hybrid is more accurate for
 specific names/titles but adds complexity.
 
-ANSWER:
+ANSWER: hybrid
 
 
 ----------------------------------------------------------------------
@@ -72,5 +71,5 @@ Is /data/vault/ currently empty (building from scratch) or do you already
 have notes in there? This affects whether we spec an initial bulk-index
 step or just the incremental file watcher.
 
-ANSWER:
+ANSWER: right now it is currently empty.
 

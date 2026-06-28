@@ -1,4 +1,10 @@
 Authlib==1.7.2
+chromadb>=0.6.0
+watchdog>=4.0.0
+python-frontmatter>=1.1.0
+pypdf>=6.0.0
+beautifulsoup4>=4.12.0
+python-docx>=1.1.0
 groq==1.4.0
 google-genai==2.8.0
 blinker==1.9.0

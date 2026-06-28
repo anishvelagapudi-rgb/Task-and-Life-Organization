@@ -1,9 +1,44 @@
 import json
+import logging
 import os
+import random
+import time
 from google import genai
 from google.genai import types
 from .provider import AIProvider
 from . import budget
+
+logger = logging.getLogger(__name__)
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BASE_DELAY = 1.0  # seconds; doubles each attempt, plus 0–1 s jitter
+
+
+def _is_retryable(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    if code in _RETRYABLE_STATUS:
+        return True
+    try:
+        return int(str(exc).split()[0]) in _RETRYABLE_STATUS
+    except (ValueError, IndexError):
+        return False
+
+
+def _with_retry(fn):
+    """Call fn(), retrying up to _MAX_RETRIES times on transient 5xx/429 errors."""
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt == _MAX_RETRIES:
+                raise
+            delay = _BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                "Transient API error (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1, _MAX_RETRIES, delay, exc,
+            )
+            time.sleep(delay)
 
 _TYPE_MAP = {
     "string":  types.Type.STRING,
@@ -27,6 +62,8 @@ def _convert_schema(schema: dict) -> types.Schema:
         kwargs["required"] = schema["required"]
     if "enum" in schema:
         kwargs["enum"] = schema["enum"]
+    if "items" in schema:
+        kwargs["items"] = _convert_schema(schema["items"])
     return types.Schema(**kwargs)
 
 
@@ -123,30 +160,30 @@ class GeminiProvider(AIProvider):
         )
 
     def chat(self, system: str, messages: list[dict]) -> str:
-        budget.check()  # fail fast if budget already blown before hitting the API
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=_to_gemini_contents(messages),
-            config=types.GenerateContentConfig(system_instruction=system),
-        )
-        self._record(response)  # record actual token usage from the response
+        budget.check()
+        contents = _to_gemini_contents(messages)
+        config = types.GenerateContentConfig(system_instruction=system)
+        response = _with_retry(lambda: self.client.models.generate_content(
+            model=self.model, contents=contents, config=config,
+        ))
+        self._record(response)
         return response.text
 
     def chat_with_tools(self, system: str, messages: list[dict], tools: list[dict]) -> tuple[str, list[dict]]:
-        budget.check()  # fail fast if budget already blown before hitting the API
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=_to_gemini_contents(messages),
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                tools=_convert_tools(tools),
-            ),
+        budget.check()
+        contents = _to_gemini_contents(messages)
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            tools=_convert_tools(tools),
         )
-        self._record(response)  # record actual token usage from the response
+        response = _with_retry(lambda: self.client.models.generate_content(
+            model=self.model, contents=contents, config=config,
+        ))
+        self._record(response)
 
         text_parts = []
         tool_calls = []
-        for idx, part in enumerate(response.candidates[0].content.parts):
+        for idx, part in enumerate(response.candidates[0].content.parts or []):
             if part.function_call and part.function_call.name:
                 tool_calls.append({
                     "call_id": f"call_{idx}",

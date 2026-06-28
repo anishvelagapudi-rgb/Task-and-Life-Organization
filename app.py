@@ -3,9 +3,13 @@ load_dotenv()
 
 import json
 import logging
+import os
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db
+
+VAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vault")
 from classes.Task import Task
 from classes.Project import Project
 from api import api_bp
@@ -118,6 +122,10 @@ def all_projects():
 
 
 # ─── index ────────────────────────────────────────────────────────────────────
+
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
 
 @app.route("/")
 def index():
@@ -405,7 +413,8 @@ def chat_message():
     if not content:
         return json.dumps({"error": "content is required"}), 400, {"Content-Type": "application/json"}
     try:
-        reply = _ai_service.chat(get_db(), [{"role": "user", "content": content}])
+        full_messages = list(CHAT_HISTORY) + [{"role": "user", "content": content}]
+        reply = _ai_service.chat(get_db(), full_messages)
     except BudgetExceededError as e:
         # Hard stop — do NOT call explain_error (that would make another API call).
         # Log it loudly so it's obvious a human needs to look at the server.
@@ -436,6 +445,138 @@ def handle_exception(e):
     raise e
 
 
+# ─── vault ────────────────────────────────────────────────────────────────────
+
+def _vault_tree() -> dict:
+    """Build {folder_name: [file_dicts]} from the vault directory."""
+    tree = {}
+    if not os.path.exists(VAULT_ROOT):
+        return tree
+    for entry in sorted(os.scandir(VAULT_ROOT), key=lambda e: (e.name != "inbox", e.name)):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        files = []
+        for f in sorted(os.scandir(entry.path), key=lambda e: e.name):
+            if f.is_file() and not f.name.startswith("."):
+                stat = f.stat()
+                files.append({
+                    "name": f.name,
+                    "path": f"{entry.name}/{f.name}",
+                    "ext": Path(f.name).suffix.lower().lstrip(".") or "file",
+                    "mtime": Path(f.path).stat().st_mtime,
+                    "mtime_str": __import__("datetime").datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d"),
+                    "size": stat.st_size,
+                })
+        tree[entry.name] = files
+    return tree
+
+
+@app.route("/vault")
+def vault_browser():
+    if not get_current_user():
+        return redirect(url_for("login"))
+    tree = _vault_tree()
+    total = sum(len(files) for files in tree.values())
+    return render_template("vault.html", tree=tree, total=total)
+
+
+@app.route("/vault/upload", methods=["POST"])
+def vault_upload():
+    if not get_current_user():
+        xhr = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        if xhr:
+            return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+        return redirect(url_for("login"))
+
+    folder = request.form.get("folder", "inbox").strip().lower()
+    # Sanitize: only allow simple folder names, no path traversal
+    folder = "".join(c for c in folder if c.isalnum() or c in "-_")
+    if not folder:
+        folder = "inbox"
+
+    uploaded_files = request.files.getlist("file")
+    saved, errors = [], []
+
+    for f in uploaded_files:
+        if not f or not f.filename:
+            continue
+        try:
+            from services.vault.processor import save_upload
+            path = save_upload(f, folder, VAULT_ROOT)
+            saved.append(Path(path).name)
+            try:
+                from services.rag.indexer import index_file
+                index_file(path)
+            except Exception:
+                pass  # watcher will catch it
+        except ValueError as e:
+            errors.append(str(e))
+        except Exception as e:
+            logger.exception("vault_upload failed for %s", f.filename)
+            errors.append(f"Failed to process '{f.filename}': {e}")
+
+    xhr = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    if xhr:
+        if errors and not saved:
+            return json.dumps({"error": errors[0]}), 400, {"Content-Type": "application/json"}
+        return json.dumps({"saved": saved, "errors": errors}), 200, {"Content-Type": "application/json"}
+
+    return redirect(url_for("vault_browser"))
+
+
+@app.route("/vault/folder", methods=["POST"])
+def vault_new_folder():
+    if not get_current_user():
+        return redirect(url_for("login"))
+    name = request.form.get("name", "").strip().lower()
+    name = "".join(c for c in name if c.isalnum() or c in "-_")
+    if name:
+        os.makedirs(os.path.join(VAULT_ROOT, name), exist_ok=True)
+    return redirect(url_for("vault_browser"))
+
+
+@app.route("/vault/folder/<name>/delete", methods=["POST"])
+def vault_delete_folder(name):
+    if not get_current_user():
+        return redirect(url_for("login"))
+    name = "".join(c for c in name if c.isalnum() or c in "-_")
+    folder_path = os.path.join(VAULT_ROOT, name)
+    if os.path.isdir(folder_path) and folder_path.startswith(VAULT_ROOT):
+        import shutil
+        shutil.rmtree(folder_path)
+        try:
+            from services.rag.store import _get_client
+            _get_client().delete_collection(name)
+        except Exception:
+            pass
+    return redirect(url_for("vault_browser"))
+
+
+@app.route("/vault/file/<path:filepath>")
+def vault_file_view(filepath):
+    if not get_current_user():
+        return redirect(url_for("login"))
+    abs_path = os.path.abspath(os.path.join(VAULT_ROOT, filepath))
+    if not abs_path.startswith(VAULT_ROOT + os.sep) or not os.path.isfile(abs_path):
+        return "Not found", 404
+    content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
+    if request.args.get("raw"):
+        return content, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return render_template("vault_file.html", filepath=filepath, content=content)
+
+
+def _start_rag():
+    """Run initial vault index + start file watcher in a background daemon thread."""
+    try:
+        from services.rag import indexer, watcher
+        indexer.index_all()
+        watcher.start()
+    except Exception:
+        logger.exception("RAG startup failed — vault indexing disabled")
+
+
 if __name__ == "__main__":
+    import threading
     init_db(app)
+    threading.Thread(target=_start_rag, daemon=True).start()
     app.run(debug=True)

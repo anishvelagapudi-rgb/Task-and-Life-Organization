@@ -63,6 +63,7 @@
     flex-shrink: 0;
     padding-top: 12px;
     border-top: 1px solid var(--border);
+    align-items: flex-end;
   }
 
   #chat-input {
@@ -76,7 +77,6 @@
   }
 
   #send-btn {
-    align-self: flex-end;
     height: 44px;
     padding: 0 20px;
     border-radius: 6px;
@@ -84,6 +84,33 @@
   }
 
   #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #attach-btn {
+    height: 44px;
+    width: 44px;
+    padding: 0;
+    border-radius: 6px;
+    font-size: 18px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #attach-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #attach-file { display: none; }
+
+  .sys-msg {
+    align-self: center;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
 </style>
 
 <div class="chat-wrap">
@@ -95,6 +122,9 @@
   <div class="chat-history" id="history"></div>
 
   <div class="chat-input-row">
+    <button id="attach-btn" title="Upload file to vault inbox" onclick="document.getElementById('attach-file').click()">📎</button>
+    <input type="file" id="attach-file" multiple accept=".md,.txt,.pdf,.html,.htm,.csv,.docx"
+           onchange="uploadFiles(this.files)">
     <textarea id="chat-input" placeholder="What should I work on right now?"></textarea>
     <button id="send-btn" onclick="sendMessage()">Send</button>
   </div>
@@ -164,6 +194,45 @@
       sendMessage();
     }
   });
+
+  function appendSys(text) {
+    const div = document.createElement('div');
+    div.className = 'sys-msg';
+    div.textContent = text;
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+
+  async function uploadFiles(files) {
+    if (!files.length) return;
+    const names = Array.from(files).map(f => f.name).join(', ');
+    appendSys(`Uploading ${files.length === 1 ? files[0].name : files.length + ' files'} → vault/inbox…`);
+
+    const fd = new FormData();
+    fd.append('folder', 'inbox');
+    for (const f of files) fd.append('file', f);
+
+    try {
+      const res = await fetch('/vault/upload', {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: fd,
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error) {
+        appendSys('Upload failed: ' + (data?.error || res.status));
+      } else {
+        const n = data.saved.length;
+        appendSys(`✓ ${n} file${n !== 1 ? 's' : ''} saved to vault/inbox — ask me about ${n === 1 ? 'it' : 'them'} anytime.`);
+        if (data.errors?.length) appendSys('Skipped: ' + data.errors.join('; '));
+      }
+    } catch (err) {
+      appendSys('Upload error: ' + err.message);
+    }
+
+    // Reset so same file can be re-selected
+    document.getElementById('attach-file').value = '';
+  }
 
   loadHistory();
   inputEl.focus();

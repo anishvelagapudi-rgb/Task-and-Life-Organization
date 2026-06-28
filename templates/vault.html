@@ -1,0 +1,323 @@
+{% extends "layout.html" %}
+{% block title %}Vault{% endblock %}
+{% block content %}
+
+<style>
+  .vault-layout {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 24px;
+    align-items: start;
+  }
+
+  /* ── tree ── */
+  h1 { margin-bottom: 20px; }
+
+  .tree-node { font-size: 13px; }
+
+  .folder-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+    color: var(--text);
+  }
+  .folder-row:hover { background: var(--surface); }
+
+  .folder-icon { font-size: 13px; width: 16px; text-align: center; }
+  .chevron {
+    font-size: 9px;
+    color: var(--muted);
+    width: 12px;
+    text-align: center;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  .chevron.open { transform: rotate(90deg); }
+
+  .folder-name { font-weight: 500; flex: 1; }
+  .folder-count {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--border);
+    padding: 1px 6px;
+    border-radius: 8px;
+  }
+
+  .folder-children {
+    display: none;
+    padding-left: 20px;
+    border-left: 1px solid var(--border);
+    margin-left: 19px;
+  }
+  .folder-children.open { display: block; }
+
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .file-row:hover { background: var(--surface); color: var(--text); }
+  .file-icon { width: 16px; text-align: center; font-size: 11px; }
+
+  .ext-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .ext-badge.md   { background: #1a2e1a; color: var(--success); }
+  .ext-badge.pdf  { background: #2e1a1a; color: var(--danger); }
+  .ext-badge.html,
+  .ext-badge.htm  { background: #2e241a; color: var(--warn); }
+  .ext-badge.csv  { background: #1e2a3a; color: var(--accent); }
+
+  .empty-folder { padding: 4px 8px; font-size: 12px; color: var(--muted); font-style: italic; }
+
+  /* ── upload panel ── */
+  .upload-panel {
+    position: sticky;
+    top: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .upload-panel h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0;
+  }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .drop-zone:hover,
+  .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(74, 158, 255, 0.05);
+  }
+  .drop-icon { font-size: 36px; }
+  .drop-label { font-size: 14px; font-weight: 500; color: var(--text); }
+  .drop-sub   { font-size: 12px; color: var(--muted); }
+  .drop-types { font-size: 11px; color: var(--muted); }
+
+  #upload-file { display: none; }
+
+  .upload-status {
+    font-size: 12px;
+    border-radius: 4px;
+    padding: 8px 12px;
+    display: none;
+  }
+  .upload-status.show { display: block; }
+  .upload-status.uploading { background: #1e2a3a; color: var(--accent); }
+  .upload-status.success   { background: #1a2e1a; color: var(--success); }
+  .upload-status.error     { background: #2e1a1a; color: var(--danger); }
+
+  /* ── viewer overlay ── */
+  .viewer-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: stretch;
+  }
+  .viewer-overlay.open { display: flex; }
+  .viewer-backdrop { flex: 1; }
+  .viewer-panel {
+    width: min(700px, 92vw);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewer-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .viewer-path { flex: 1; font-size: 12px; color: var(--muted); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .viewer-close { background: transparent; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+  .viewer-close:hover { color: var(--text); }
+  .viewer-content { flex: 1; overflow-y: auto; padding: 16px; }
+  .viewer-content pre { font-family: monospace; font-size: 12px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; margin: 0; }
+</style>
+
+<!-- File viewer -->
+<div class="viewer-overlay" id="viewer-overlay">
+  <div class="viewer-backdrop" onclick="closeViewer()"></div>
+  <div class="viewer-panel">
+    <div class="viewer-toolbar">
+      <span class="viewer-path" id="viewer-path"></span>
+      <button class="viewer-close" onclick="closeViewer()">✕</button>
+    </div>
+    <div class="viewer-content"><pre id="viewer-pre"></pre></div>
+  </div>
+</div>
+
+<h1>Vault</h1>
+
+<div class="vault-layout">
+
+  <!-- ── left: tree ── -->
+  <div>
+    {% if not tree %}
+      <p style="color:var(--muted);font-size:13px;">No sections yet.</p>
+    {% endif %}
+    {% for folder, files in tree.items() %}
+    <div class="tree-node">
+      <div class="folder-row" onclick="toggleFolder('{{ folder }}')">
+        <span class="chevron" id="chev-{{ folder }}">▶</span>
+        <span class="folder-icon">📁</span>
+        <span class="folder-name">{{ folder }}</span>
+        <span class="folder-count">{{ files|length }}</span>
+      </div>
+      <div class="folder-children" id="children-{{ folder }}">
+        {% if files %}
+          {% for f in files %}
+          <div class="file-row" onclick="viewFile('{{ f.path }}')">
+            <span class="file-icon">·</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.name }}</span>
+            <span class="ext-badge {{ f.ext }}">{{ f.ext }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty-folder">empty</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ── right: upload panel ── -->
+  <div class="upload-panel">
+    <h2>Upload to Inbox</h2>
+
+    <div class="drop-zone" id="drop-zone"
+         onclick="document.getElementById('upload-file').click()"
+         ondragover="onDragOver(event)"
+         ondragleave="onDragLeave(event)"
+         ondrop="onDrop(event)">
+      <span class="drop-icon">⬆</span>
+      <span class="drop-label">Drop files or click to browse</span>
+      <span class="drop-sub">Goes straight to <code>vault/inbox</code></span>
+      <span class="drop-types">md · txt · pdf · html · csv · docx</span>
+    </div>
+
+    <input type="file" id="upload-file" multiple
+           accept=".md,.txt,.pdf,.html,.htm,.csv,.docx"
+           onchange="doUpload(this.files)">
+
+    <div class="upload-status" id="upload-status"></div>
+  </div>
+
+</div>
+
+<script>
+  function toggleFolder(name) {
+    const children = document.getElementById('children-' + name);
+    const chev     = document.getElementById('chev-' + name);
+    children.classList.toggle('open');
+    chev.classList.toggle('open');
+  }
+
+  // ── drag-and-drop ──
+  function onDragOver(e) {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.add('drag-over');
+  }
+  function onDragLeave(e) {
+    document.getElementById('drop-zone').classList.remove('drag-over');
+  }
+  function onDrop(e) {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+    doUpload(e.dataTransfer.files);
+  }
+
+  // ── upload ──
+  function doUpload(files) {
+    if (!files || !files.length) return;
+    setStatus('uploading', `Uploading ${files.length} file${files.length !== 1 ? 's' : ''}…`);
+
+    const fd = new FormData();
+    fd.append('folder', 'inbox');
+    for (const f of files) fd.append('file', f);
+
+    fetch('/vault/upload', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd,
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        setStatus('error', 'Error: ' + data.error);
+      } else {
+        const n = data.saved.length;
+        setStatus('success', `✓ ${n} file${n !== 1 ? 's' : ''} saved to inbox`);
+        setTimeout(() => location.reload(), 1200);
+      }
+    })
+    .catch(err => setStatus('error', 'Network error: ' + err.message));
+
+    document.getElementById('upload-file').value = '';
+  }
+
+  function setStatus(type, msg) {
+    const el = document.getElementById('upload-status');
+    el.textContent = msg;
+    el.className = 'upload-status show ' + type;
+  }
+
+  // ── file viewer ──
+  function viewFile(filepath) {
+    document.getElementById('viewer-path').textContent = filepath;
+    document.getElementById('viewer-pre').textContent  = 'Loading…';
+    document.getElementById('viewer-overlay').classList.add('open');
+    fetch('/vault/file/' + filepath + '?raw=1')
+      .then(r => r.text())
+      .then(t => { document.getElementById('viewer-pre').textContent = t; })
+      .catch(err => { document.getElementById('viewer-pre').textContent = 'Error: ' + err.message; });
+  }
+  function closeViewer() {
+    document.getElementById('viewer-overlay').classList.remove('open');
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+</script>
+
+{% endblock %}
