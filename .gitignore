@@ -47,3 +47,7 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+
+# personal vault content & vector store
+data/vault/
+data/chroma/
