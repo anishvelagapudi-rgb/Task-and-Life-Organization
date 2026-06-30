@@ -1,5 +1,5 @@
 """
-Session budget guard for AI API calls.
+Hourly rolling budget guard for AI API calls.
 
 HOW IT WORKS:
   Every call to the Gemini API returns a `usage_metadata` object in the response.
@@ -9,13 +9,12 @@ HOW IT WORKS:
 
   gemini_provider.py reads those counts from the response and passes them here
   via record_usage(). We multiply by the per-token dollar rates to get the cost
-  of that call, add it to the running session total, and raise BudgetExceededError
-  if we've crossed the limit.
+  of that call, append it with a timestamp to a rolling deque, and raise
+  BudgetExceededError if the sum of costs in the last 60 minutes exceeds the limit.
 
-  The blown flag is module-level and intentionally never resets within a process.
-  Once the budget is hit, every subsequent AI call raises immediately without
-  touching the API. A server restart is required to re-enable AI — that's the
-  "human in the loop" checkpoint.
+  Once the rolling window slides past old entries, the budget automatically recovers —
+  no server restart needed. The limit applies to all API calls combined (generative
+  AND embedding).
 
 PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
   Gemini 2.5 Flash Lite — Input:  $0.10 / 1M tokens  ← unconfirmed
@@ -23,29 +22,26 @@ PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
   gemini-embedding-001  — Input:  $0.025 / 1M tokens  ← unconfirmed (estimated from text-embedding-004)
   Embedding responses carry no usage_metadata, so token count is estimated at 1 token per 4 chars.
 
-SESSION_LIMIT defaults to $0.05 but can be overridden via AI_SESSION_BUDGET in .env.
-The limit applies to all API calls combined — generative AND embedding.
+HOURLY_LIMIT defaults to $0.05 but can be overridden via AI_HOURLY_BUDGET in .env.
 """
 
 import logging
 import os
+import time
+from collections import deque
 from logging.handlers import RotatingFileHandler
 
-# Configurable via .env so you can raise/lower the cap without touching code
-SESSION_LIMIT: float = float(os.environ.get("AI_SESSION_BUDGET", "0.05"))
+_WINDOW_SECONDS = 3600  # 1 hour rolling window
 
-# Dollar cost per token (input and output are priced differently)
-_INPUT_RATE  = 0.10  / 1_000_000   # per input token  — update after verifying at ai.google.dev/pricing
-_OUTPUT_RATE = 0.40  / 1_000_000   # per output token — update after verifying at ai.google.dev/pricing
-_EMBED_RATE  = 0.025 / 1_000_000   # per embedding token (estimated) — update after verifying
+HOURLY_LIMIT: float = float(os.environ.get("AI_HOURLY_BUDGET", "0.05"))
 
-# Running total and kill-switch — module-level so they survive across requests
-# but reset when the server process restarts
-_cumulative_cost: float = 0.0
-_budget_blown: bool = False
+_INPUT_RATE  = 0.10  / 1_000_000
+_OUTPUT_RATE = 0.40  / 1_000_000
+_EMBED_RATE  = 0.025 / 1_000_000
 
-# Separate log file just for cost tracking — keeps errors.log clean
-# and gives you an easy audit trail of every API call with its token counts
+# Deque of (timestamp, cost) tuples — old entries fall off naturally
+_call_log: deque = deque()
+
 _handler = RotatingFileHandler("costs.log", maxBytes=1_000_000, backupCount=3)
 _handler.setFormatter(logging.Formatter(
     "%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -59,15 +55,30 @@ class BudgetExceededError(RuntimeError):
     pass
 
 
+def _hourly_cost() -> float:
+    """Sum of all call costs within the last 60 minutes."""
+    cutoff = time.time() - _WINDOW_SECONDS
+    return sum(cost for ts, cost in _call_log if ts >= cutoff)
+
+
+def _trim() -> None:
+    """Drop entries older than the rolling window to keep the deque bounded."""
+    cutoff = time.time() - _WINDOW_SECONDS
+    while _call_log and _call_log[0][0] < cutoff:
+        _call_log.popleft()
+
+
 def check() -> None:
     """
     Pre-flight check — call this before hitting the API to fail fast
-    if the budget was already blown by a previous request this session.
+    if the hourly budget is already exhausted.
     """
-    if _budget_blown:
+    _trim()
+    spent = _hourly_cost()
+    if spent >= HOURLY_LIMIT:
         raise BudgetExceededError(
-            f"Session AI budget of ${SESSION_LIMIT:.2f} exceeded. "
-            "AI is disabled until the server is restarted."
+            f"Hourly AI budget of ${HOURLY_LIMIT:.2f} exceeded "
+            f"(${spent:.4f} spent in the last hour). Try again later."
         )
 
 
@@ -75,37 +86,24 @@ def record_usage(input_tokens: int, output_tokens: int, model: str) -> float:
     """
     Called by the provider after every successful API response.
 
-    input_tokens / output_tokens come directly from response.usage_metadata,
-    which Gemini populates with the actual token counts for that call.
-
     Returns the dollar cost of this specific call.
-    Raises BudgetExceededError if this call pushed the running total over the limit.
-    Once blown, every future call also raises — no further API calls are made.
+    Raises BudgetExceededError if this call pushed the rolling hourly total over the limit.
     """
-    global _cumulative_cost, _budget_blown
-
-    # If a previous call already blew the budget, stop immediately
-    if _budget_blown:
-        raise BudgetExceededError(
-            f"Session AI budget of ${SESSION_LIMIT:.2f} already exceeded. "
-            "AI is disabled until the server is restarted."
-        )
+    _trim()
 
     call_cost = input_tokens * _INPUT_RATE + output_tokens * _OUTPUT_RATE
-    _cumulative_cost += call_cost
+    _call_log.append((time.time(), call_cost))
+    hourly = _hourly_cost()
 
-    # Every call is logged so you can audit exactly what ran up the bill
     _cost_log.info(
-        "model=%-30s  in=%6d  out=%6d  call=$%.5f  total=$%.5f  limit=$%.2f",
-        model, input_tokens, output_tokens, call_cost, _cumulative_cost, SESSION_LIMIT,
+        "model=%-30s  in=%6d  out=%6d  call=$%.5f  hour=$%.5f  limit=$%.2f",
+        model, input_tokens, output_tokens, call_cost, hourly, HOURLY_LIMIT,
     )
 
-    if _cumulative_cost >= SESSION_LIMIT:
-        _budget_blown = True
+    if hourly >= HOURLY_LIMIT:
         raise BudgetExceededError(
-            f"Session AI budget of ${SESSION_LIMIT:.2f} reached "
-            f"(spent ${_cumulative_cost:.4f}). "
-            "AI is disabled until the server is restarted."
+            f"Hourly AI budget of ${HOURLY_LIMIT:.2f} reached "
+            f"(${hourly:.4f} spent in the last hour). Try again later."
         )
 
     return call_cost
@@ -115,44 +113,36 @@ def record_embedding_usage(char_count: int, model: str) -> float:
     """
     Called by the embedder after every embed_content API call.
 
-    The Gemini embedding API returns no usage_metadata, so we estimate token
-    count from character count at 1 token per 4 characters — the standard
-    approximation. Both generative and embedding costs feed the same running
-    total and the same $SESSION_LIMIT kill-switch.
+    Token count is estimated at 1 token per 4 characters.
     """
-    global _cumulative_cost, _budget_blown
-
-    if _budget_blown:
-        raise BudgetExceededError(
-            f"Session AI budget of ${SESSION_LIMIT:.2f} already exceeded. "
-            "AI is disabled until the server is restarted."
-        )
+    _trim()
 
     estimated_tokens = max(1, char_count // 4)
     call_cost = estimated_tokens * _EMBED_RATE
-    _cumulative_cost += call_cost
+    _call_log.append((time.time(), call_cost))
+    hourly = _hourly_cost()
 
     _cost_log.info(
-        "model=%-30s  chars=%6d  ~tokens=%5d  call=$%.6f  total=$%.5f  limit=$%.2f  [embed]",
-        model, char_count, estimated_tokens, call_cost, _cumulative_cost, SESSION_LIMIT,
+        "model=%-30s  chars=%6d  ~tokens=%5d  call=$%.6f  hour=$%.5f  limit=$%.2f  [embed]",
+        model, char_count, estimated_tokens, call_cost, hourly, HOURLY_LIMIT,
     )
 
-    if _cumulative_cost >= SESSION_LIMIT:
-        _budget_blown = True
+    if hourly >= HOURLY_LIMIT:
         raise BudgetExceededError(
-            f"Session AI budget of ${SESSION_LIMIT:.2f} reached "
-            f"(spent ${_cumulative_cost:.4f}). "
-            "AI is disabled until the server is restarted."
+            f"Hourly AI budget of ${HOURLY_LIMIT:.2f} reached "
+            f"(${hourly:.4f} spent in the last hour). Try again later."
         )
 
     return call_cost
 
 
 def get_stats() -> dict:
-    """Current spend stats — useful for a status endpoint or debug logging."""
+    """Current hourly spend stats — useful for a status endpoint or debug logging."""
+    _trim()
+    hourly = _hourly_cost()
     return {
-        "total_cost": round(_cumulative_cost, 6),
-        "limit":      SESSION_LIMIT,
-        "remaining":  round(max(0.0, SESSION_LIMIT - _cumulative_cost), 6),
-        "blown":      _budget_blown,
+        "hourly_cost":  round(hourly, 6),
+        "limit":        HOURLY_LIMIT,
+        "remaining":    round(max(0.0, HOURLY_LIMIT - hourly), 6),
+        "window_hours": 1,
     }
