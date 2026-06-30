@@ -1,0 +1,75 @@
+{% extends "layout.html" %}
+{% block title %}Chats{% endblock %}
+{% block content %}
+
+<style>
+  .chat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .chat-card:hover { border-color: #3a3a3a; }
+  .chat-card-body { flex: 1; min-width: 0; }
+  .chat-card-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chat-card-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .badge-saved {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #1a2e1a;
+    color: var(--success);
+    flex-shrink: 0;
+  }
+  .chat-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+</style>
+
+<div class="ctrl-bar" style="margin-bottom: 20px;">
+  <h1 style="margin-bottom: 0;">Chats</h1>
+  <form method="POST" action="/chat/new">
+    <button type="submit" class="btn-sm">+ New Chat</button>
+  </form>
+</div>
+
+{% if chats %}
+  {% for c in chats %}
+  <div class="chat-card">
+    <div class="chat-card-body">
+      <a href="/chat/{{ c.id }}" class="chat-card-title" style="display:block; text-decoration:none;">
+        {{ c.title }}
+      </a>
+      <div class="chat-card-meta">{{ c.updated_at[:10] }}</div>
+    </div>
+    {% if c.indexed %}
+      <span class="badge-saved">saved to vault</span>
+    {% endif %}
+    <div class="chat-actions">
+      <a href="/chat/{{ c.id }}" class="btn btn-ghost btn-sm">Open</a>
+      <form method="POST" action="/chat/{{ c.id }}/delete" onsubmit="return confirm('Delete this chat?')">
+        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="empty">No chats yet.</p>
+{% endif %}
+
+{% endblock %}

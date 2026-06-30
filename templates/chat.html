@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% block title %}Chat{% endblock %}
+{% block title %}{{ chat.title }}{% endblock %}
 {% block content %}
 
 <style>
@@ -12,9 +12,57 @@
   }
 
   .chat-header {
-    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
     flex-shrink: 0;
   }
+
+  .chat-header-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-header-title h1 {
+    margin-bottom: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 18px;
+  }
+
+  .chat-header-title .sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .chat-header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  #save-btn {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  #save-btn.saved {
+    border-color: var(--success);
+    color: var(--success);
+  }
+
+  #save-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #save-btn.saved:hover { border-color: var(--danger); color: var(--danger); }
 
   .chat-history {
     flex: 1;
@@ -115,11 +163,29 @@
 
 <div class="chat-wrap">
   <div class="chat-header">
-    <h1 style="margin-bottom: 4px;">Chat</h1>
-    <p style="color: var(--muted); font-size: 13px;">Ask about your tasks, get recommendations, or think through what to work on next.</p>
+    <div class="chat-header-title">
+      <h1 id="chat-title">{{ chat.title }}</h1>
+      <div class="sub"><a href="/chat" style="color:var(--muted);">← All chats</a></div>
+    </div>
+    <div class="chat-header-actions">
+      <button id="save-btn" class="{{ 'saved' if chat.indexed else '' }}"
+              title="{{ 'Remove from vault' if chat.indexed else 'Save to vault for RAG' }}">
+        {{ 'Saved to vault' if chat.indexed else 'Save to vault' }}
+      </button>
+      <form method="POST" action="/chat/new" style="margin:0;">
+        <button type="submit" class="btn btn-ghost btn-sm">+ New</button>
+      </form>
+    </div>
   </div>
 
-  <div class="chat-history" id="history"></div>
+  <div class="chat-history" id="history">
+    {% for m in messages %}
+    <div class="msg {{ m.role }}">{{ m.content }}</div>
+    {% endfor %}
+    {% if not messages %}
+    <div class="sys-msg">New chat — ask about your tasks, notes, or anything on your mind.</div>
+    {% endif %}
+  </div>
 
   <div class="chat-input-row">
     <button id="attach-btn" title="Upload file to vault inbox" onclick="document.getElementById('attach-file').click()">📎</button>
@@ -131,9 +197,13 @@
 </div>
 
 <script>
+  const CHAT_ID   = {{ chat.id | tojson }};
   const historyEl = document.getElementById('history');
   const inputEl   = document.getElementById('chat-input');
   const sendBtn   = document.getElementById('send-btn');
+  const saveBtn   = document.getElementById('save-btn');
+
+  let isSaved = {{ 'true' if chat.indexed else 'false' }};
 
   function appendMsg(role, text) {
     const div = document.createElement('div');
@@ -144,13 +214,12 @@
     return div;
   }
 
-  // Load existing history from the server on page load
-  async function loadHistory() {
-    const res = await fetch('/chat/history');
-    const data = await res.json();
-    for (const msg of (data.messages || [])) {
-      appendMsg(msg.role, msg.content);
-    }
+  function appendSys(text) {
+    const div = document.createElement('div');
+    div.className = 'sys-msg';
+    div.textContent = text;
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
   }
 
   async function sendMessage() {
@@ -160,11 +229,15 @@
     inputEl.value = '';
     sendBtn.disabled = true;
 
+    // Remove the "new chat" placeholder if present
+    const placeholder = historyEl.querySelector('.sys-msg');
+    if (placeholder) placeholder.remove();
+
     appendMsg('user', text);
     const thinking = appendMsg('thinking', 'Thinking…');
 
     try {
-      const res = await fetch('/chat/message', {
+      const res = await fetch(`/chat/${CHAT_ID}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text }),
@@ -174,10 +247,18 @@
       const data = await res.json().catch(() => null);
 
       if (!res.ok || !data || data.error) {
-        const msg = data?.error || `Server error (${res.status})`;
-        appendMsg('assistant', 'Error: ' + msg);
+        appendMsg('assistant', 'Error: ' + (data?.error || `Server error (${res.status})`));
       } else {
         appendMsg('assistant', data.reply);
+        // Update page title to reflect auto-title on first message
+        if (document.getElementById('chat-title').textContent === 'New Chat') {
+          const titleRes = await fetch(`/chat/${CHAT_ID}`);
+          // Can't easily extract the title from HTML; rely on server-set h1 on next load.
+          // Just trim the input as a local approximation.
+          const approx = text.slice(0, 60) + (text.length > 60 ? '...' : '');
+          document.getElementById('chat-title').textContent = approx;
+          document.title = approx;
+        }
       }
     } catch (err) {
       thinking.remove();
@@ -195,17 +276,24 @@
     }
   });
 
-  function appendSys(text) {
-    const div = document.createElement('div');
-    div.className = 'sys-msg';
-    div.textContent = text;
-    historyEl.appendChild(div);
-    historyEl.scrollTop = historyEl.scrollHeight;
-  }
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    try {
+      const res = await fetch(`/chat/${CHAT_ID}/save`, { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data) { saveBtn.disabled = false; return; }
+      isSaved = data.indexed;
+      saveBtn.textContent = isSaved ? 'Saved to vault' : 'Save to vault';
+      saveBtn.title = isSaved ? 'Remove from vault' : 'Save to vault for RAG';
+      saveBtn.className = isSaved ? 'saved' : '';
+    } catch (err) {
+      appendSys('Save failed: ' + err.message);
+    }
+    saveBtn.disabled = false;
+  });
 
   async function uploadFiles(files) {
     if (!files.length) return;
-    const names = Array.from(files).map(f => f.name).join(', ');
     appendSys(`Uploading ${files.length === 1 ? files[0].name : files.length + ' files'} → vault/inbox…`);
 
     const fd = new FormData();
@@ -230,11 +318,11 @@
       appendSys('Upload error: ' + err.message);
     }
 
-    // Reset so same file can be re-selected
     document.getElementById('attach-file').value = '';
   }
 
-  loadHistory();
+  // Scroll to bottom on load
+  historyEl.scrollTop = historyEl.scrollHeight;
   inputEl.focus();
 </script>
 

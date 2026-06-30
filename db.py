@@ -22,6 +22,20 @@ def init_db(app):
     with app.app_context():
         db = get_db()
         db.executescript("""
+            CREATE TABLE IF NOT EXISTS chats (
+                id         TEXT PRIMARY KEY,
+                title      TEXT NOT NULL DEFAULT 'New Chat',
+                indexed    INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id         TEXT PRIMARY KEY,
+                chat_id    TEXT NOT NULL,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS projects (
                 id          TEXT PRIMARY KEY,
                 title       TEXT NOT NULL,
@@ -33,7 +47,7 @@ def init_db(app):
             );
             CREATE TABLE IF NOT EXISTS tasks (
                 id               TEXT PRIMARY KEY,
-                parent_task_id   INTEGER,
+                parent_task_id   TEXT,
                 title            TEXT NOT NULL,
                 description      TEXT,
                 status           TEXT DEFAULT 'inbox',
@@ -44,7 +58,7 @@ def init_db(app):
                 energy_type      TEXT,
                 fear_level       INTEGER,
                 ambiguity_level  INTEGER,
-                project_id       INTEGER REFERENCES projects(id),
+                project_id       TEXT REFERENCES projects(id),
                 source_type      TEXT DEFAULT 'manual',
                 ai_generated     INTEGER DEFAULT 0,
                 created_at       TEXT NOT NULL,

@@ -170,8 +170,10 @@
           </button>
           {% endif %}
         </form>
-        <a href="/tasks/{{ task.id }}/delete" class="btn btn-danger"
-           onclick="return confirm('Delete this task?')">Delete</a>
+        <form method="POST" action="/tasks/{{ task.id }}/delete" style="margin:0;"
+              onsubmit="return confirm('Delete this task?')">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
       </div>
     </form>
   </div>
@@ -191,8 +193,8 @@
 // parent_task_id === null means the task is a root-level task.
 // The browser uses this to build the tree — the server never constructs one.
 const ALL_TASKS  = {{ all_tasks_json | safe }};
-const CURRENT_ID = {{ task.id }};   // the task this page is showing
-const ROOT_ID    = {{ root_id }};   // topmost ancestor of CURRENT_ID
+const CURRENT_ID = {{ task.id | tojson }};   // the task this page is showing
+const ROOT_ID    = {{ root_id | tojson }};   // topmost ancestor of CURRENT_ID
 
 // ── build lookup maps from the flat list ────────────────────────────────
 

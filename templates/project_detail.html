@@ -38,8 +38,10 @@
       </div>
       <div class="actions">
         <button type="submit">Save</button>
-        <a href="/projects/{{ project.id }}/delete" class="btn btn-danger"
-           onclick="return confirm('Delete this project?')">Delete</a>
+        <form method="POST" action="/projects/{{ project.id }}/delete" style="margin:0;"
+              onsubmit="return confirm('Delete this project?')">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
       </div>
     </form>
   </div>

@@ -30,21 +30,24 @@ Recommend tasks that maximize: urgency + actionability + momentum - resistance.
 - Match energy type to what the user is likely capable of right now
 
 KNOWLEDGE BASE (VAULT):
-You have access to the user's personal vault — markdown notes on classes, people, projects,
-goals, journals, and more. When relevant notes are retrieved, they appear as VAULT CONTEXT below.
+You have access to the user's personal vault — notes organized into four folders:
+people (notes about specific people), projects (notes tied to a named project or class),
+reference (look-up material: how-tos, facts, definitions), journal (personal entries and reflections),
+and inbox (unsorted or recently added files).
 
 Rules for vault usage:
 - Prefer vault content over general knowledge when answering questions about the user's life/work.
-- Cite the source file when using vault content (e.g. "According to classes/cs101.md...").
+- Cite the source file when using vault content (e.g. "According to projects/cs101.md...").
 - If no vault context was retrieved and you're using general knowledge, you MUST literally
   append the exact characters "(GK)" to the end of your response — no exceptions. Then on
   a new line, ask if the user wants you to search the vault more broadly. Example ending:
   "...the answer is 3,422°C. (GK)\n\nWant me to search your vault for anything related?"
 - Retrieved chunks may not always be perfectly relevant — use your judgment about whether
   they actually apply to the question.
-- Notes marked [AI-GENERATED, UNREVIEWED] may be inaccurate — always surface uncertainty
-  when citing them.
 - Use search_vault when the user asks about notes or when you want to look something up explicitly.
+- Use read_document to read a complete vault file when full coverage matters (e.g., course
+  requirements, syllabi, full reference docs). Prefer this over search_vault when you need the
+  entire document, not just relevant snippets. The path is vault-relative (e.g. 'reference/unc-cs-requirements.html').
 - Use create_note to save important insights to the vault when the user asks or when you spot
   a clear knowledge gap worth documenting.
 
@@ -166,8 +169,8 @@ TOOLS = [
                     "collection": {
                         "type": "string",
                         "description": (
-                            "Scope to a specific collection: "
-                            "classes | people | projects | journal | goals | reference | ai_generated | meta"
+                            "Scope to a specific folder: "
+                            "people | projects | reference | journal | inbox"
                         ),
                     },
                     "k": {
@@ -176,6 +179,28 @@ TOOLS = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document",
+            "description": (
+                "Read the full content of a vault document by its vault-relative path. "
+                "Use when you need complete coverage of a reference file — e.g. course "
+                "requirements, syllabi, full how-to guides. Prefer this over search_vault "
+                "when the question requires the entire document, not just relevant snippets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Vault-relative path (e.g. 'reference/unc-cs-requirements.html')",
+                    },
+                },
+                "required": ["path"],
             },
         },
     },
@@ -291,6 +316,24 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         db.commit()
         return {"success": True, "id": task_id}
 
+    if name == "read_document":
+        try:
+            from services.rag.chunker import _extract_text
+            from services.rag.indexer import VAULT_ROOT
+
+            rel = args["path"].lstrip("/")
+            abs_path = os.path.realpath(os.path.join(VAULT_ROOT, rel))
+            vault_root = os.path.realpath(VAULT_ROOT)
+            if not abs_path.startswith(vault_root + os.sep):
+                return {"found": False, "error": "Path is outside the vault"}
+            if not os.path.exists(abs_path):
+                return {"found": False, "error": f"File not found: {args['path']}"}
+            _, content = _extract_text(abs_path)
+            return {"found": True, "path": args["path"], "content": content}
+        except Exception as e:
+            logger.exception("read_document tool failed")
+            return {"found": False, "error": str(e)}
+
     if name == "search_vault":
         try:
             from services.rag.retriever import retrieve
@@ -311,8 +354,6 @@ def _execute_tool(db, name: str, args: dict) -> dict:
                         "collection": c.collection,
                         "heading": c.heading,
                         "text": c.text[:1200],
-                        "ai_generated": c.ai_generated,
-                        "reviewed": c.reviewed,
                     }
                     for c in results
                 ],
@@ -330,20 +371,16 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             if not slug:
                 slug = "note"
             filename = slug + ".md"
-            path = os.path.join(VAULT_ROOT, "ai_generated", filename)
+            path = os.path.join(VAULT_ROOT, "inbox", filename)
 
-            # Never overwrite a user note; ai_generated/ is AI-only territory
             if os.path.exists(path):
                 ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                path = os.path.join(VAULT_ROOT, "ai_generated", f"{slug}-{ts}.md")
+                path = os.path.join(VAULT_ROOT, "inbox", f"{slug}-{ts}.md")
 
             meta = {
-                "type": "ai_generated",
                 "title": args["title"],
                 "topic": args["topic"],
                 "tags": args.get("tags", []),
-                "ai_generated": True,
-                "reviewed": False,
                 "created_at": _now(),
                 "updated_at": _now(),
             }
@@ -533,6 +570,25 @@ CURRENT TASKS:
                     logger.exception("search_vault injection fallback failed")
                     ctx = ""
                 fresh_system = f"{base_system}\n\n{ctx}" if ctx else base_system
+                return self.provider.chat(fresh_system, messages) or ""
+
+            if len(tool_calls) == 1 and tool_calls[0]["name"] == "read_document":
+                tc = tool_calls[0]
+                result = _execute_tool(db, "read_document", tc["arguments"])
+                if result.get("found"):
+                    path = tc["arguments"]["path"]
+                    ctx = (
+                        f"DOCUMENT CONTEXT ({path}):\n"
+                        f"{result['content']}\n"
+                        "---"
+                    )
+                else:
+                    ctx = (
+                        f"[read_document failed for '{tc['arguments']['path']}': "
+                        f"{result.get('error', 'unknown error')}. "
+                        f"Tell the user the file was not found in the vault.]"
+                    )
+                fresh_system = f"{base_system}\n\n{ctx}"
                 return self.provider.chat(fresh_system, messages) or ""
 
             # Drop passive RAG context for subsequent rounds — tool results already

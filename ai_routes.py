@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import httpx
 from flask import Blueprint, jsonify, request
 from db import get_db
 from services.ai.gemini_provider import GeminiProvider
@@ -36,7 +37,10 @@ def recommendations():
     GET /api/ai/recommendations
     Returns top 3 recommended tasks + an insight about the task list.
     """
-    result = _get_service().get_recommendations(get_db())
+    try:
+        result = _get_service().get_recommendations(get_db())
+    except httpx.NetworkError:
+        return jsonify({"error": "AI service unreachable"}), 503
     return jsonify(result)
 
 
@@ -55,5 +59,8 @@ def chat():
     if not messages or not isinstance(messages, list):
         return jsonify({"error": "messages array is required"}), 400
 
-    reply = _get_service().chat(get_db(), messages)
+    try:
+        reply = _get_service().chat(get_db(), messages)
+    except httpx.NetworkError:
+        return jsonify({"error": "AI service unreachable"}), 503
     return jsonify({"reply": reply})

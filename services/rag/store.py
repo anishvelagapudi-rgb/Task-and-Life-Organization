@@ -45,8 +45,6 @@ class StoredChunk:
     source_path: str
     collection: str
     heading: str
-    ai_generated: bool
-    reviewed: bool
     distance: float
 
 
@@ -62,8 +60,6 @@ def upsert_chunks(collection_name: str, chunks, embeddings: list[list[float]]) -
             {
                 "source_path": c.source_path,
                 "heading": c.heading,
-                "ai_generated": int(c.ai_generated),
-                "reviewed": int(c.reviewed),
             }
             for c in chunks
         ],
@@ -97,8 +93,6 @@ def query_collection(
                 source_path=meta["source_path"],
                 collection=collection_name,
                 heading=meta.get("heading", ""),
-                ai_generated=bool(meta.get("ai_generated", 0)),
-                reviewed=bool(meta.get("reviewed", 1)),
                 distance=dist,
             )
             for doc, meta, dist in zip(

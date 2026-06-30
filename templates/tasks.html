@@ -104,9 +104,9 @@
         <td class="adv-col">{{ task.estimated_effort or '—' }}</td>
         <td class="adv-col">{{ task.project_title or '—' }}</td>
         <td class="adv-col">{{ task.tags | join(', ') if task.tags else '—' }}</td>
-        <td class="adv-col"><span style="font-family:monospace;font-size:11px;color:var(--muted)">{{ task.id[:8] }}</span></td>
+        <td class="adv-col"><span style="font-family:monospace;font-size:11px;color:var(--muted)">{{ task.id | string | truncate(8, True, '') }}</span></td>
         <td class="complete-col">
-          <button onclick="toggleComplete(this, {{ task.id }})" title="Toggle complete">
+          <button onclick="toggleComplete(this, {{ task.id | tojson }})" title="Toggle complete">
             {{ '↩' if task.status == 'done' else '✓' }}
           </button>
         </td>

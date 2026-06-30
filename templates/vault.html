@@ -183,7 +183,12 @@
   <div class="viewer-panel">
     <div class="viewer-toolbar">
       <span class="viewer-path" id="viewer-path"></span>
-      <button class="viewer-close" onclick="closeViewer()">✕</button>
+      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+        <select id="move-folder-select" style="font-size:12px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);"></select>
+        <button onclick="moveViewedFile()" style="font-size:12px;padding:3px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;">Move</button>
+        <button class="viewer-close" onclick="deleteViewedFile()" title="Delete file" style="color:var(--danger);margin-left:2px;">🗑</button>
+        <button class="viewer-close" onclick="closeViewer()">✕</button>
+      </div>
     </div>
     <div class="viewer-content"><pre id="viewer-pre"></pre></div>
   </div>
@@ -225,7 +230,18 @@
 
   <!-- ── right: upload panel ── -->
   <div class="upload-panel">
-    <h2>Upload to Inbox</h2>
+    <h2>Upload to Vault</h2>
+
+    <div class="field">
+      <label for="folder-select">Folder</label>
+      <select id="folder-select" class="filter-select" style="width:100%;font-size:13px;padding:7px 10px;" onchange="onFolderChange()">
+        <option value="inbox">inbox — unsorted / decide later</option>
+        <option value="people">people — notes about a specific person</option>
+        <option value="projects">projects — named project or class</option>
+        <option value="reference">reference — look-up material, how-tos, facts</option>
+        <option value="journal">journal — personal entries, reflections</option>
+      </select>
+    </div>
 
     <div class="drop-zone" id="drop-zone"
          onclick="document.getElementById('upload-file').click()"
@@ -234,7 +250,7 @@
          ondrop="onDrop(event)">
       <span class="drop-icon">⬆</span>
       <span class="drop-label">Drop files or click to browse</span>
-      <span class="drop-sub">Goes straight to <code>vault/inbox</code></span>
+      <span class="drop-sub" id="drop-dest">→ <code>vault/inbox</code></span>
       <span class="drop-types">md · txt · pdf · html · csv · docx</span>
     </div>
 
@@ -243,11 +259,29 @@
            onchange="doUpload(this.files)">
 
     <div class="upload-status" id="upload-status"></div>
+
+    <div style="border-top:1px solid var(--border);margin:0 -4px;"></div>
+
+    <div>
+      <h2 style="margin-bottom:10px;">Fetch from URL</h2>
+      <div style="display:flex;gap:8px;">
+        <input type="url" id="fetch-url-input" placeholder="https://…"
+               style="flex:1;font-size:13px;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);"
+               onkeydown="if(event.key==='Enter')doFetchUrl()">
+        <button onclick="doFetchUrl()"
+                style="padding:7px 14px;font-size:13px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">
+          Fetch
+        </button>
+      </div>
+      <div class="upload-status" id="fetch-status" style="margin-top:8px;"></div>
+    </div>
   </div>
 
 </div>
 
 <script>
+  const VAULT_FOLDERS = {{ tree.keys()|list|tojson }};
+
   function toggleFolder(name) {
     const children = document.getElementById('children-' + name);
     const chev     = document.getElementById('chev-' + name);
@@ -269,13 +303,19 @@
     doUpload(e.dataTransfer.files);
   }
 
+  function onFolderChange() {
+    const folder = document.getElementById('folder-select').value;
+    document.getElementById('drop-dest').innerHTML = `→ <code>vault/${folder}</code>`;
+  }
+
   // ── upload ──
   function doUpload(files) {
     if (!files || !files.length) return;
+    const folder = document.getElementById('folder-select').value;
     setStatus('uploading', `Uploading ${files.length} file${files.length !== 1 ? 's' : ''}…`);
 
     const fd = new FormData();
-    fd.append('folder', 'inbox');
+    fd.append('folder', folder);
     for (const f of files) fd.append('file', f);
 
     fetch('/vault/upload', {
@@ -289,7 +329,7 @@
         setStatus('error', 'Error: ' + data.error);
       } else {
         const n = data.saved.length;
-        setStatus('success', `✓ ${n} file${n !== 1 ? 's' : ''} saved to inbox`);
+        setStatus('success', `✓ ${n} file${n !== 1 ? 's' : ''} saved to ${folder}`);
         setTimeout(() => location.reload(), 1200);
       }
     })
@@ -304,18 +344,98 @@
     el.className = 'upload-status show ' + type;
   }
 
+  function doFetchUrl() {
+    const url = document.getElementById('fetch-url-input').value.trim();
+    if (!url) return;
+    const folder = document.getElementById('folder-select').value;
+    const status = document.getElementById('fetch-status');
+    status.textContent = 'Fetching…';
+    status.className = 'upload-status show uploading';
+
+    const fd = new FormData();
+    fd.append('url', url);
+    fd.append('folder', folder);
+
+    fetch('/vault/fetch-url', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd,
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        status.textContent = 'Error: ' + data.error;
+        status.className = 'upload-status show error';
+      } else {
+        status.textContent = `✓ Saved as ${data.saved} in ${data.folder}`;
+        status.className = 'upload-status show success';
+        document.getElementById('fetch-url-input').value = '';
+        setTimeout(() => location.reload(), 1200);
+      }
+    })
+    .catch(err => {
+      status.textContent = 'Network error: ' + err.message;
+      status.className = 'upload-status show error';
+    });
+  }
+
   // ── file viewer ──
   function viewFile(filepath) {
     document.getElementById('viewer-path').textContent = filepath;
     document.getElementById('viewer-pre').textContent  = 'Loading…';
     document.getElementById('viewer-overlay').classList.add('open');
+
+    const currentFolder = filepath.split('/')[0];
+    const sel = document.getElementById('move-folder-select');
+    sel.innerHTML = VAULT_FOLDERS
+      .filter(f => f !== currentFolder)
+      .map(f => `<option value="${f}">${f}</option>`)
+      .join('');
+
     fetch('/vault/file/' + filepath + '?raw=1')
       .then(r => r.text())
       .then(t => { document.getElementById('viewer-pre').textContent = t; })
       .catch(err => { document.getElementById('viewer-pre').textContent = 'Error: ' + err.message; });
   }
+
+  function moveViewedFile() {
+    const filepath = document.getElementById('viewer-path').textContent;
+    const folder = document.getElementById('move-folder-select').value;
+    if (!filepath || !folder) return;
+
+    const fd = new FormData();
+    fd.append('folder', folder);
+    fetch('/vault/file/' + filepath + '/move', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd,
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { alert('Error: ' + data.error); return; }
+      closeViewer();
+      location.reload();
+    })
+    .catch(err => alert('Network error: ' + err.message));
+  }
   function closeViewer() {
     document.getElementById('viewer-overlay').classList.remove('open');
+  }
+
+  function deleteViewedFile() {
+    const filepath = document.getElementById('viewer-path').textContent;
+    if (!filepath || !confirm(`Delete ${filepath}?`)) return;
+    fetch('/vault/file/' + filepath + '/delete', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { alert('Error: ' + data.error); return; }
+      closeViewer();
+      location.reload();
+    })
+    .catch(err => alert('Network error: ' + err.message));
   }
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
 </script>

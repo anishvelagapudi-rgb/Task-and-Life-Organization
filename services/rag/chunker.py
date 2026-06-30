@@ -5,7 +5,7 @@ from pathlib import Path
 
 CHUNK_MAX_CHARS = 2000
 OVERLAP_CHARS = 200
-SUPPORTED_EXTENSIONS = {".md", ".pdf", ".html", ".htm", ".docx", ".txt"}
+SUPPORTED_EXTENSIONS = {".md", ".pdf", ".html", ".htm", ".docx", ".txt", ".csv"}
 
 
 @dataclass
@@ -15,8 +15,6 @@ class Chunk:
     collection: str
     heading: str = ""
     tags: list = field(default_factory=list)
-    ai_generated: bool = False
-    reviewed: bool = True
 
 
 def _parse_file(path: str) -> tuple[dict, str]:
@@ -118,8 +116,6 @@ def chunk_file(path: str, collection: str) -> list[Chunk]:
     tags = meta.get("tags") or []
     if not isinstance(tags, list):
         tags = [str(tags)]
-    ai_generated = bool(meta.get("ai_generated", False))
-    reviewed = bool(meta.get("reviewed", True))
 
     chunks = []
     prev_tail = ""
@@ -135,8 +131,6 @@ def chunk_file(path: str, collection: str) -> list[Chunk]:
                     collection=collection,
                     heading=heading,
                     tags=tags,
-                    ai_generated=ai_generated,
-                    reviewed=reviewed,
                 ))
         prev_tail = body[-OVERLAP_CHARS:].strip() if body else ""
     return chunks

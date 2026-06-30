@@ -57,10 +57,6 @@ google = oauth.register(
 VALID_SESSIONS = {}
 OWNER_EMAIL = os.environ['OWNER_EMAIL']
 
-# In-memory chat history. Resets on server restart.
-# List of {"role": "user"|"assistant", "content": "..."}
-CHAT_HISTORY = []
-
 # Shared AI service instance — initialized once after .env is loaded.
 _ai_service = AIService(GeminiProvider())
 
@@ -319,7 +315,7 @@ def complete_task(task_id):
     return redirect(request.referrer or url_for('get_tasks'))
 
 
-@app.route("/tasks/<task_id>/delete")
+@app.route("/tasks/<task_id>/delete", methods=["POST"])
 def delete_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -390,45 +386,167 @@ def update_project(project_id):
 
 # ─── chat ─────────────────────────────────────────────────────────────────────
 
+def _chat_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 @app.route("/chat")
-def chat_page():
+def chat_list():
     if not get_current_user():
         return redirect(url_for('login'))
-    return render_template("chat.html")
+    chats = [dict(r) for r in get_db().execute(
+        "SELECT * FROM chats ORDER BY updated_at DESC"
+    ).fetchall()]
+    return render_template("chats.html", chats=chats)
 
 
-@app.route("/chat/history")
-def chat_history():
+@app.route("/chat/new", methods=["POST"])
+def chat_new():
+    if not get_current_user():
+        return redirect(url_for('login'))
+    chat_id = str(uuid.uuid4())
+    now = _chat_now()
+    db = get_db()
+    db.execute(
+        "INSERT INTO chats (id, title, indexed, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
+        (chat_id, "New Chat", now, now),
+    )
+    db.commit()
+    return redirect(url_for('chat_view', chat_id=chat_id))
+
+
+@app.route("/chat/<chat_id>")
+def chat_view(chat_id):
+    if not get_current_user():
+        return redirect(url_for('login'))
+    db = get_db()
+    row = db.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    if row is None:
+        return "Chat not found", 404
+    messages = [dict(m) for m in db.execute(
+        "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
+        (chat_id,),
+    ).fetchall()]
+    return render_template("chat.html", chat=dict(row), messages=messages)
+
+
+@app.route("/chat/<chat_id>/message", methods=["POST"])
+def chat_message(chat_id):
     if not get_current_user():
         return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
-    return json.dumps({"messages": CHAT_HISTORY}), 200, {"Content-Type": "application/json"}
+    db = get_db()
+    row = db.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    if row is None:
+        return json.dumps({"error": "Chat not found"}), 404, {"Content-Type": "application/json"}
 
-
-@app.route("/chat/message", methods=["POST"])
-def chat_message():
-    if not get_current_user():
-        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
     data = request.get_json(force=True) or {}
     content = (data.get("content") or "").strip()
     if not content:
         return json.dumps({"error": "content is required"}), 400, {"Content-Type": "application/json"}
+
+    history = [dict(m) for m in db.execute(
+        "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
+        (chat_id,),
+    ).fetchall()]
+
     try:
-        full_messages = list(CHAT_HISTORY) + [{"role": "user", "content": content}]
-        reply = _ai_service.chat(get_db(), full_messages)
+        reply = _ai_service.chat(db, history + [{"role": "user", "content": content}])
     except BudgetExceededError as e:
-        # Hard stop — do NOT call explain_error (that would make another API call).
-        # Log it loudly so it's obvious a human needs to look at the server.
         logger.error("BUDGET EXCEEDED — AI disabled until server restart: %s", e)
         reply = str(e)
     except Exception as e:
         logger.exception("chat_message failed | user_input=%r", content)
-        reply = _ai_service.explain_error(get_db(), content, str(e))
-    CHAT_HISTORY.append({"role": "user", "content": content})
-    CHAT_HISTORY.append({"role": "assistant", "content": reply})
+        reply = _ai_service.explain_error(db, content, str(e))
+
+    now = _chat_now()
+    db.execute(
+        "INSERT INTO chat_messages (id, chat_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
+        (str(uuid.uuid4()), chat_id, content, now),
+    )
+    db.execute(
+        "INSERT INTO chat_messages (id, chat_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
+        (str(uuid.uuid4()), chat_id, reply, now),
+    )
+
+    # Auto-title from the first user message
+    if not history:
+        title = content[:60] + ("..." if len(content) > 60 else "")
+        db.execute("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?", (title, now, chat_id))
+    else:
+        db.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
+
+    db.commit()
+
+    # Re-index if this chat is saved to the vault
+    if dict(row)["indexed"]:
+        try:
+            from services.rag.chat_indexer import index_chat
+            title_row = db.execute("SELECT title FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            all_msgs = history + [
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": reply},
+            ]
+            index_chat(chat_id, title_row["title"], all_msgs)
+        except Exception:
+            logger.exception("Failed to re-index chat %s", chat_id)
+
     return json.dumps({"reply": reply}), 200, {"Content-Type": "application/json"}
 
 
-@app.route("/projects/<project_id>/delete")
+@app.route("/chat/<chat_id>/save", methods=["POST"])
+def chat_save(chat_id):
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    db = get_db()
+    row = db.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    if row is None:
+        return json.dumps({"error": "Chat not found"}), 404, {"Content-Type": "application/json"}
+
+    chat = dict(row)
+    new_indexed = 0 if chat["indexed"] else 1
+    db.execute(
+        "UPDATE chats SET indexed = ?, updated_at = ? WHERE id = ?",
+        (new_indexed, _chat_now(), chat_id),
+    )
+    db.commit()
+
+    try:
+        if new_indexed:
+            from services.rag.chat_indexer import index_chat
+            messages = [dict(m) for m in db.execute(
+                "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
+                (chat_id,),
+            ).fetchall()]
+            index_chat(chat_id, chat["title"], messages)
+        else:
+            from services.rag.chat_indexer import deindex_chat
+            deindex_chat(chat_id)
+    except Exception:
+        logger.exception("Failed to update RAG index for chat %s", chat_id)
+
+    return json.dumps({"indexed": bool(new_indexed)}), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/chat/<chat_id>/delete", methods=["POST"])
+def chat_delete(chat_id):
+    if not get_current_user():
+        return redirect(url_for('login'))
+    db = get_db()
+    row = db.execute("SELECT indexed FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    if row and row["indexed"]:
+        try:
+            from services.rag.chat_indexer import deindex_chat
+            deindex_chat(chat_id)
+        except Exception:
+            logger.exception("Failed to deindex chat %s before deletion", chat_id)
+    db.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+    db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    db.commit()
+    return redirect(url_for('chat_list'))
+
+
+@app.route("/projects/<project_id>/delete", methods=["POST"])
 def delete_project(project_id):
     if not get_current_user():
         return redirect(url_for('login'))
@@ -524,6 +642,77 @@ def vault_upload():
     return redirect(url_for("vault_browser"))
 
 
+@app.route("/vault/fetch-url", methods=["POST"])
+def vault_fetch_url():
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+
+    url = request.form.get("url", "").strip()
+    folder = request.form.get("folder", "reference").strip().lower()
+    folder = "".join(c for c in folder if c.isalnum() or c in "-_") or "reference"
+
+    if not url:
+        return json.dumps({"error": "URL is required"}), 400, {"Content-Type": "application/json"}
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return json.dumps({"error": "Only http/https URLs are supported"}), 400, {"Content-Type": "application/json"}
+
+    try:
+        import requests as http_req
+        import re as _re
+
+        resp = http_req.get(url, timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
+        }, stream=True)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "html" not in content_type:
+            return json.dumps({"error": f"URL did not return HTML (got: {content_type})"}), 400, {"Content-Type": "application/json"}
+
+        # Read with a 5 MB cap
+        chunks = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=True):
+            total += len(chunk)
+            if total > 5 * 1024 * 1024:
+                return json.dumps({"error": "Page too large (> 5 MB)"}), 400, {"Content-Type": "application/json"}
+            chunks.append(chunk)
+        html = "".join(chunks)
+
+        # Build filename from hostname + path
+        raw_slug = f"{parsed.netloc}-{parsed.path}".strip("/").replace("/", "-")
+        slug = _re.sub(r"[^\w\-]", "-", raw_slug)
+        slug = _re.sub(r"-+", "-", slug).strip("-")[:80] or "page"
+        filename = f"{slug}.html"
+
+        dest = os.path.join(VAULT_ROOT, folder, filename)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+        if os.path.exists(dest):
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            filename = f"{slug}-{ts}.html"
+            dest = os.path.join(VAULT_ROOT, folder, filename)
+
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(html)
+
+        try:
+            from services.rag.indexer import index_file
+            index_file(dest)
+        except Exception:
+            pass  # watcher will catch it
+
+        return json.dumps({"saved": filename, "folder": folder}), 200, {"Content-Type": "application/json"}
+
+    except Exception as e:
+        logger.exception("vault_fetch_url failed for %s", url)
+        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
+
+
 @app.route("/vault/folder", methods=["POST"])
 def vault_new_folder():
     if not get_current_user():
@@ -535,13 +724,64 @@ def vault_new_folder():
     return redirect(url_for("vault_browser"))
 
 
+@app.route("/vault/file/<path:filepath>/move", methods=["POST"])
+def vault_move_file(filepath):
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    dest_folder = request.form.get("folder", "").strip().lower()
+    dest_folder = "".join(c for c in dest_folder if c.isalnum() or c in "-_")
+    if not dest_folder:
+        return json.dumps({"error": "Destination folder is required"}), 400, {"Content-Type": "application/json"}
+
+    vault_real = os.path.realpath(VAULT_ROOT)
+    src = os.path.realpath(os.path.join(VAULT_ROOT, filepath))
+    if not src.startswith(vault_real + os.sep) or not os.path.isfile(src):
+        return json.dumps({"error": "File not found"}), 404, {"Content-Type": "application/json"}
+
+    dest_dir = os.path.join(VAULT_ROOT, dest_folder)
+    dest = os.path.join(dest_dir, os.path.basename(src))
+    if os.path.realpath(dest) == src:
+        return json.dumps({"error": "File is already in that folder"}), 400, {"Content-Type": "application/json"}
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        from services.rag.indexer import delete_file, index_file
+        delete_file(src)
+        os.rename(src, dest)
+        index_file(dest)
+        new_path = f"{dest_folder}/{os.path.basename(src)}"
+        return json.dumps({"ok": True, "path": new_path}), 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        logger.exception("vault_move_file failed for %s", filepath)
+        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
+
+
+@app.route("/vault/file/<path:filepath>/delete", methods=["POST"])
+def vault_delete_file(filepath):
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    abs_path = os.path.realpath(os.path.join(VAULT_ROOT, filepath))
+    if not abs_path.startswith(os.path.realpath(VAULT_ROOT) + os.sep):
+        return json.dumps({"error": "Invalid path"}), 400, {"Content-Type": "application/json"}
+    if not os.path.isfile(abs_path):
+        return json.dumps({"error": "File not found"}), 404, {"Content-Type": "application/json"}
+    try:
+        from services.rag.indexer import delete_file
+        delete_file(abs_path)
+        os.remove(abs_path)
+        return json.dumps({"ok": True}), 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        logger.exception("vault_delete_file failed for %s", filepath)
+        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
+
+
 @app.route("/vault/folder/<name>/delete", methods=["POST"])
 def vault_delete_folder(name):
     if not get_current_user():
         return redirect(url_for("login"))
     name = "".join(c for c in name if c.isalnum() or c in "-_")
     folder_path = os.path.join(VAULT_ROOT, name)
-    if os.path.isdir(folder_path) and folder_path.startswith(VAULT_ROOT):
+    if os.path.isdir(folder_path) and folder_path.startswith(VAULT_ROOT + os.sep):
         import shutil
         shutil.rmtree(folder_path)
         try:
