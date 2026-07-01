@@ -1,4 +1,6 @@
 Authlib==1.7.2
+dateparser>=1.4.0
+icalendar>=5.0.0
 chromadb>=0.6.0
 watchdog>=4.0.0
 python-frontmatter>=1.1.0

@@ -1,0 +1,530 @@
+{% extends "layout.html" %}
+{% block title %}Calendar{% endblock %}
+
+{% block head %}
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+{% endblock %}
+
+{% block container_class %}cal-wrapper{% endblock %}
+
+{% block content %}
+<style>
+  .cal-wrapper { display: flex; height: calc(100vh - 45px); overflow: hidden; }
+
+  /* ── sidebar ── */
+  .cal-sidebar {
+    width: 220px;
+    min-width: 220px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+    padding: 16px 0;
+  }
+  .cal-sidebar-top {
+    padding: 0 14px 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .cal-section { padding: 8px 14px; }
+  .cal-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .cal-section-head .icon-btn {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; padding: 0; line-height: 1;
+  }
+  .cal-section-head .icon-btn:hover { color: var(--text); }
+  .cal-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 0;
+    gap: 6px;
+  }
+  .cal-toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text);
+    flex: 1;
+    min-width: 0;
+  }
+  .cal-toggle-label input[type="checkbox"] { display: none; }
+  .cal-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0; opacity: 1; transition: opacity 0.15s;
+  }
+  .cal-toggle-label input:not(:checked) ~ .cal-dot { opacity: 0.3; }
+  .cal-toggle-label input:not(:checked) ~ .cal-name { color: var(--muted); }
+  .cal-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cal-item-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; }
+  .cal-item:hover .cal-item-actions { opacity: 1; }
+  .icon-btn-sm {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 13px; padding: 2px; line-height: 1;
+  }
+  .icon-btn-sm:hover { color: var(--text); }
+
+  /* ── main ── */
+  .cal-main { flex: 1; overflow: auto; padding: 16px; }
+
+  /* ── FullCalendar dark theme overrides ── */
+  .fc { --fc-border-color: var(--border); --fc-page-bg-color: var(--bg);
+         --fc-neutral-bg-color: var(--surface); --fc-today-bg-color: rgba(74,158,255,0.07);
+         --fc-now-indicator-color: var(--accent); color: var(--text); }
+  .fc-theme-standard td, .fc-theme-standard th { border-color: var(--border); }
+  .fc .fc-button { background: var(--surface); border-color: var(--border); color: var(--text); font-size: 12px; }
+  .fc .fc-button:hover { background: var(--border); }
+  .fc .fc-button-primary:not(:disabled).fc-button-active,
+  .fc .fc-button-primary:not(:disabled):active { background: var(--accent); border-color: var(--accent); }
+  .fc .fc-toolbar-title { font-size: 16px; font-weight: 600; }
+  .fc .fc-col-header-cell-cushion { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .fc .fc-daygrid-day-number { color: var(--muted); font-size: 12px; }
+  .fc .fc-day-today .fc-daygrid-day-number { color: var(--accent); font-weight: 600; }
+  .fc-event { border-radius: 3px; font-size: 12px; cursor: pointer; }
+  .fc-event-title { font-weight: 500; }
+  .fc .fc-timegrid-slot { border-color: var(--border); }
+  .fc .fc-timegrid-slot-label { font-size: 11px; color: var(--muted); }
+
+  /* ── modals ── */
+  dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 0;
+    width: 420px;
+    max-width: 95vw;
+  }
+  dialog::backdrop { background: rgba(0,0,0,0.6); }
+  .modal-inner { padding: 20px; }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px 0;
+    font-weight: 600; font-size: 15px;
+  }
+  .modal-header .icon-btn { font-size: 18px; }
+  .modal-form { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 20px; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .modal-actions .btn-danger { margin-left: auto; }
+
+  /* ── color picker ── */
+  .color-picker { display: flex; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
+  .color-swatch {
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: transform 0.1s;
+  }
+  .color-swatch:hover { transform: scale(1.15); }
+  .color-swatch.selected { border-color: var(--text); }
+</style>
+
+<aside class="cal-sidebar">
+  <div class="cal-sidebar-top">
+    <button class="btn btn-sm" style="width:100%" onclick="openEventModal()">+ New Event</button>
+  </div>
+
+  <div class="cal-section">
+    <div class="cal-section-head">
+      My Calendars
+      <button class="icon-btn" onclick="openNewCalModal()" title="New calendar">+</button>
+    </div>
+    {% for cal in local_cals %}
+    <div class="cal-item">
+      <label class="cal-toggle-label">
+        <input type="checkbox" class="local-cal-toggle" data-cal-id="{{ cal.id }}" checked>
+        <span class="cal-dot" style="background:{{ cal.color }}"></span>
+        <span class="cal-name">{{ cal.name }}</span>
+      </label>
+      <div class="cal-item-actions">
+        {% if cal.ics_url %}
+        <button class="icon-btn-sm" title="Sync ICS" onclick="syncCal('{{ cal.id }}')">↻</button>
+        {% endif %}
+        <button class="icon-btn-sm" title="Edit" onclick="openEditCalModal({{ cal | tojson }})">✎</button>
+      </div>
+    </div>
+    {% else %}
+    <div style="font-size:12px;color:var(--muted);padding:4px 0">No calendars yet.</div>
+    {% endfor %}
+  </div>
+
+  {% if gcal_connected %}
+  <div class="cal-section">
+    <div class="cal-section-head">Google Calendar</div>
+    <div id="gcal-list"><span style="font-size:12px;color:var(--muted)">Loading…</span></div>
+  </div>
+  {% else %}
+  <div class="cal-section">
+    <div class="cal-section-head">Google Calendar</div>
+    <a href="/auth/start" class="btn btn-ghost btn-sm" style="width:100%;text-align:center;margin-top:4px">Connect GCal</a>
+  </div>
+  {% endif %}
+
+  <div class="cal-section">
+    <div class="cal-section-head">Layers</div>
+    <div class="cal-item">
+      <label class="cal-toggle-label">
+        <input type="checkbox" id="toggle-tasks" checked>
+        <span class="cal-dot" style="background:#ffb84a"></span>
+        <span class="cal-name">Task Deadlines</span>
+      </label>
+    </div>
+  </div>
+</aside>
+
+<main class="cal-main">
+  <div id="calendar"></div>
+</main>
+
+<!-- ── Event modal ── -->
+<dialog id="event-modal">
+  <div class="modal-header">
+    <span id="event-modal-title">New Event</span>
+    <button class="icon-btn" onclick="document.getElementById('event-modal').close()">✕</button>
+  </div>
+  <form id="event-form" class="modal-form" onsubmit="submitEvent(event)">
+    <input type="hidden" id="event-id">
+    <div class="field">
+      <label>Title</label>
+      <input type="text" id="event-title" required>
+    </div>
+    <div class="field">
+      <label>Calendar</label>
+      <select id="event-cal-id">
+        {% for cal in local_cals %}
+        <option value="{{ cal.id }}">{{ cal.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <label class="cal-toggle-label" style="gap:8px">
+      <input type="checkbox" id="event-allday" onchange="toggleAllDay(this.checked)">
+      <span style="font-size:13px">All day</span>
+    </label>
+    <div id="event-time-row" class="row">
+      <div class="field">
+        <label>Start</label>
+        <input type="datetime-local" id="event-start">
+      </div>
+      <div class="field">
+        <label>End</label>
+        <input type="datetime-local" id="event-end">
+      </div>
+    </div>
+    <div id="event-allday-row" style="display:none">
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="event-date">
+      </div>
+    </div>
+    <div class="field">
+      <label>Description</label>
+      <textarea id="event-desc" rows="2" style="resize:vertical"></textarea>
+    </div>
+    <div class="field">
+      <label>Location</label>
+      <input type="text" id="event-location">
+    </div>
+    <div class="modal-actions">
+      <button type="submit" class="btn">Save</button>
+      <button type="button" class="btn btn-ghost" onclick="document.getElementById('event-modal').close()">Cancel</button>
+      <button type="button" class="btn btn-danger" id="event-delete-btn" style="display:none" onclick="deleteEvent()">Delete</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ── Calendar modal ── -->
+<dialog id="cal-modal">
+  <div class="modal-header">
+    <span id="cal-modal-title">New Calendar</span>
+    <button class="icon-btn" onclick="document.getElementById('cal-modal').close()">✕</button>
+  </div>
+  <form id="cal-form" class="modal-form" onsubmit="submitCal(event)">
+    <input type="hidden" id="cal-id">
+    <div class="field">
+      <label>Name</label>
+      <input type="text" id="cal-name" required>
+    </div>
+    <div class="field">
+      <label>Color</label>
+      <div class="color-picker" id="color-picker"></div>
+      <input type="hidden" id="cal-color" value="#4a9eff">
+    </div>
+    <div class="field" id="ics-field">
+      <label>ICS URL <span style="color:var(--muted);font-weight:400">(optional — for Canvas or external feeds)</span></label>
+      <input type="url" id="cal-ics-url" placeholder="https://…">
+    </div>
+    <div class="modal-actions">
+      <button type="submit" class="btn">Save</button>
+      <button type="button" class="btn btn-ghost" onclick="document.getElementById('cal-modal').close()">Cancel</button>
+      <button type="button" class="btn btn-danger" id="cal-delete-btn" style="display:none" onclick="deleteCal()">Delete</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const PRESET_COLORS = ['#4a9eff','#4aff91','#ffb84a','#ff4a4a','#c084fc','#22d3ee','#fb923c','#f472b6'];
+const visibleLocalIds = new Set({{ local_cal_ids | tojson }});
+const visibleGcalIds  = new Set();
+let fcal;
+
+// ── FullCalendar init ───────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  fcal = new FullCalendar.Calendar(document.getElementById('calendar'), {
+    initialView: 'dayGridMonth',
+    headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay' },
+    height: '100%',
+    selectable: true,
+    select: onSelect,
+    eventClick: onEventClick,
+    events: loadEvents,
+    eventTimeFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
+  });
+  fcal.render();
+  setupColorPicker();
+  {% if gcal_connected %}loadGcalCals();{% endif %}
+});
+
+// ── Event feed ──────────────────────────────────────────────────────────────
+function loadEvents(info, ok, fail) {
+  const p = new URLSearchParams({
+    start: info.startStr, end: info.endStr,
+    show_tasks: document.getElementById('toggle-tasks').checked ? '1' : '0',
+    local_cal_ids: [...visibleLocalIds].join(','),
+    gcal_ids: [...visibleGcalIds].join(','),
+  });
+  fetch('/calendar/api/events?' + p).then(r => r.json()).then(ok).catch(fail);
+}
+
+// ── Toggle handlers ─────────────────────────────────────────────────────────
+document.addEventListener('change', e => {
+  if (e.target.classList.contains('local-cal-toggle')) {
+    const id = e.target.dataset.calId;
+    e.target.checked ? visibleLocalIds.add(id) : visibleLocalIds.delete(id);
+    fcal.refetchEvents();
+  }
+  if (e.target.classList.contains('gcal-toggle')) {
+    const id = e.target.dataset.calId;
+    e.target.checked ? visibleGcalIds.add(id) : visibleGcalIds.delete(id);
+    fcal.refetchEvents();
+  }
+  if (e.target.id === 'toggle-tasks') fcal.refetchEvents();
+});
+
+// ── GCal calendar list ──────────────────────────────────────────────────────
+function loadGcalCals() {
+  fetch('/calendar/api/gcal-calendars').then(r => r.json()).then(cals => {
+    const el = document.getElementById('gcal-list');
+    if (!cals.length) { el.innerHTML = '<span style="font-size:12px;color:var(--muted)">None found</span>'; return; }
+    el.innerHTML = cals.map(c => `
+      <div class="cal-item">
+        <label class="cal-toggle-label">
+          <input type="checkbox" class="gcal-toggle" data-cal-id="${c.id}" checked>
+          <span class="cal-dot" style="background:${c.backgroundColor||'#4a9eff'}"></span>
+          <span class="cal-name">${c.summary}</span>
+        </label>
+      </div>`).join('');
+    cals.forEach(c => visibleGcalIds.add(c.id));
+    fcal.refetchEvents();
+  }).catch(() => {
+    const el = document.getElementById('gcal-list');
+    if (el) el.innerHTML = '<span style="font-size:12px;color:var(--danger)">Failed to load</span>';
+  });
+}
+
+// ── Calendar interactions ────────────────────────────────────────────────────
+function onSelect(info) {
+  resetEventForm();
+  if (info.allDay) {
+    document.getElementById('event-allday').checked = true;
+    toggleAllDay(true);
+    document.getElementById('event-date').value = info.startStr.slice(0, 10);
+  } else {
+    document.getElementById('event-start').value = toLocalDT(info.start);
+    if (info.end) document.getElementById('event-end').value = toLocalDT(info.end);
+  }
+  document.getElementById('event-modal').showModal();
+}
+
+function onEventClick(info) {
+  const src = info.event.extendedProps.source;
+  if (src === 'task') { window.location.href = `/tasks/${info.event.extendedProps.task_id}`; return; }
+  if (src === 'gcal') {
+    const link = info.event.extendedProps.gcal_link;
+    if (link) window.open(link, '_blank');
+    return;
+  }
+  // local — open edit modal
+  const e = info.event;
+  resetEventForm();
+  document.getElementById('event-modal-title').textContent = 'Edit Event';
+  document.getElementById('event-id').value = e.id;
+  document.getElementById('event-title').value = e.title;
+  document.getElementById('event-cal-id').value = e.extendedProps.calendar_id || '';
+  document.getElementById('event-desc').value = e.extendedProps.description || '';
+  document.getElementById('event-location').value = e.extendedProps.location || '';
+  document.getElementById('event-delete-btn').style.display = '';
+  if (e.allDay) {
+    document.getElementById('event-allday').checked = true;
+    toggleAllDay(true);
+    document.getElementById('event-date').value = e.startStr.slice(0, 10);
+  } else {
+    document.getElementById('event-start').value = e.start ? toLocalDT(e.start) : '';
+    document.getElementById('event-end').value = e.end ? toLocalDT(e.end) : '';
+  }
+  document.getElementById('event-modal').showModal();
+}
+
+function openEventModal() {
+  resetEventForm();
+  document.getElementById('event-modal').showModal();
+}
+
+function resetEventForm() {
+  document.getElementById('event-form').reset();
+  document.getElementById('event-id').value = '';
+  document.getElementById('event-modal-title').textContent = 'New Event';
+  document.getElementById('event-delete-btn').style.display = 'none';
+  toggleAllDay(false);
+}
+
+// ── Event CRUD ───────────────────────────────────────────────────────────────
+async function submitEvent(e) {
+  e.preventDefault();
+  const id = document.getElementById('event-id').value;
+  const allDay = document.getElementById('event-allday').checked;
+  const body = {
+    title: document.getElementById('event-title').value,
+    calendar_id: document.getElementById('event-cal-id').value,
+    description: document.getElementById('event-desc').value || null,
+    location: document.getElementById('event-location').value || null,
+    all_day: allDay,
+  };
+  if (allDay) {
+    body.start_datetime = document.getElementById('event-date').value;
+    body.end_datetime = null;
+  } else {
+    body.start_datetime = document.getElementById('event-start').value;
+    body.end_datetime = document.getElementById('event-end').value || null;
+  }
+  const resp = await fetch(id ? `/calendar/api/events/${id}` : '/calendar/api/events', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+  });
+  if (resp.ok) {
+    document.getElementById('event-modal').close();
+    fcal.refetchEvents();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.error || 'Failed to save event.');
+  }
+}
+
+async function deleteEvent() {
+  const id = document.getElementById('event-id').value;
+  if (!id || !confirm('Delete this event?')) return;
+  const resp = await fetch(`/calendar/api/events/${id}/delete`, { method: 'POST' });
+  if (resp.ok) { document.getElementById('event-modal').close(); fcal.refetchEvents(); }
+  else alert('Failed to delete.');
+}
+
+function toggleAllDay(on) {
+  document.getElementById('event-time-row').style.display = on ? 'none' : '';
+  document.getElementById('event-allday-row').style.display = on ? '' : 'none';
+}
+
+// ── Calendar CRUD ─────────────────────────────────────────────────────────────
+function openNewCalModal() {
+  document.getElementById('cal-form').reset();
+  document.getElementById('cal-id').value = '';
+  document.getElementById('cal-modal-title').textContent = 'New Calendar';
+  document.getElementById('cal-delete-btn').style.display = 'none';
+  document.getElementById('ics-field').style.display = '';
+  selectColor('#4a9eff');
+  document.getElementById('cal-modal').showModal();
+}
+
+function openEditCalModal(data) {
+  document.getElementById('cal-form').reset();
+  document.getElementById('cal-id').value = data.id;
+  document.getElementById('cal-name').value = data.name;
+  document.getElementById('cal-modal-title').textContent = 'Edit Calendar';
+  document.getElementById('cal-delete-btn').style.display = '';
+  document.getElementById('ics-field').style.display = 'none';
+  selectColor(data.color || '#4a9eff');
+  document.getElementById('cal-modal').showModal();
+}
+
+async function submitCal(e) {
+  e.preventDefault();
+  const id = document.getElementById('cal-id').value;
+  const body = {
+    name: document.getElementById('cal-name').value,
+    color: document.getElementById('cal-color').value,
+  };
+  if (!id) {
+    const ics = document.getElementById('cal-ics-url').value.trim();
+    if (ics) body.ics_url = ics;
+  }
+  const resp = await fetch(id ? `/calendar/api/calendars/${id}` : '/calendar/api/calendars', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+  });
+  if (resp.ok) {
+    const result = await resp.json();
+    if (result.warning) alert(result.warning);
+    document.getElementById('cal-modal').close();
+    window.location.reload();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.error || 'Failed to save calendar.');
+  }
+}
+
+async function deleteCal() {
+  const id = document.getElementById('cal-id').value;
+  if (!id || !confirm('Delete this calendar and all its events?')) return;
+  const resp = await fetch(`/calendar/api/calendars/${id}/delete`, { method: 'POST' });
+  if (resp.ok) { document.getElementById('cal-modal').close(); window.location.reload(); }
+  else alert('Failed to delete.');
+}
+
+async function syncCal(id) {
+  const resp = await fetch(`/calendar/api/calendars/${id}/sync`, { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) { fcal.refetchEvents(); alert(`Sync complete. ${data.imported || 0} new events imported.`); }
+  else alert(data.error || 'Sync failed.');
+}
+
+// ── Color picker ─────────────────────────────────────────────────────────────
+function setupColorPicker() {
+  document.getElementById('color-picker').innerHTML = PRESET_COLORS.map(c =>
+    `<span class="color-swatch" data-color="${c}" style="background:${c}" onclick="selectColor('${c}')"></span>`
+  ).join('');
+}
+
+function selectColor(color) {
+  document.getElementById('cal-color').value = color;
+  document.querySelectorAll('.color-swatch').forEach(s =>
+    s.classList.toggle('selected', s.dataset.color === color)
+  );
+}
+
+// ── Util ─────────────────────────────────────────────────────────────────────
+function toLocalDT(date) {
+  const d = new Date(date);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+</script>
+{% endblock %}

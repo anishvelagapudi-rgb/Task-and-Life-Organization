@@ -6,6 +6,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from datetime import datetime, timezone
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db
 
@@ -48,7 +49,7 @@ google = oauth.register(
     client_id=os.environ['GOOGLE_CLIENT_ID'],
     client_secret=os.environ['GOOGLE_CLIENT_SECRET'],
     server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-    client_kwargs={'scope': 'openid email profile'}
+    client_kwargs={'scope': 'openid email profile https://www.googleapis.com/auth/calendar.readonly'}
 )
 
 # Cookie holds a UUID. VALID_SESSIONS maps that UUID -> user info server-side.
@@ -77,7 +78,14 @@ def login():
 
 @app.route('/auth/start')
 def auth_start():
-    return google.authorize_redirect(url_for('authorize', _external=True), prompt='select_account')
+    try:
+        has_refresh = bool(get_db().execute(
+            "SELECT 1 FROM tokens WHERE provider='google' AND refresh_token IS NOT NULL"
+        ).fetchone())
+    except Exception:
+        has_refresh = False
+    prompt = 'select_account' if has_refresh else 'consent'
+    return google.authorize_redirect(url_for('authorize', _external=True), prompt=prompt, access_type='offline')
 
 
 @app.route('/authorize')
@@ -88,9 +96,50 @@ def authorize():
         return redirect(url_for('login', error='This app is private. Sign in with the correct account.'))
     cookie = str(uuid.uuid4())
     VALID_SESSIONS[cookie] = {'email': email, 'name': token['userinfo'].get('name', '')}
+
+    # Persist GCal OAuth token for calendar.readonly access
+    try:
+        db = get_db()
+        expires_at = None
+        if token.get('expires_at'):
+            expires_at = datetime.fromtimestamp(float(token['expires_at']), tz=timezone.utc).isoformat()
+        if token.get('refresh_token'):
+            db.execute(
+                "INSERT OR REPLACE INTO tokens (provider, access_token, refresh_token, token_type, expires_at) VALUES (?, ?, ?, ?, ?)",
+                ('google', token['access_token'], token['refresh_token'], token.get('token_type', 'Bearer'), expires_at),
+            )
+        else:
+            existing = db.execute("SELECT refresh_token FROM tokens WHERE provider='google'").fetchone()
+            if existing:
+                db.execute(
+                    "UPDATE tokens SET access_token=?, expires_at=? WHERE provider='google'",
+                    (token['access_token'], expires_at),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO tokens (provider, access_token, refresh_token, token_type, expires_at) VALUES (?, ?, NULL, ?, ?)",
+                    ('google', token['access_token'], token.get('token_type', 'Bearer'), expires_at),
+                )
+        db.commit()
+    except Exception:
+        logger.exception("Failed to store GCal token")
+
     res = make_response(redirect(url_for('dashboard')))
     res.set_cookie('UserID', cookie)
     return res
+
+
+@app.route('/auth/reconnect-gcal')
+def reconnect_gcal():
+    """Force re-auth with calendar scope by clearing the stored GCal token."""
+    if not get_current_user():
+        return redirect(url_for('login'))
+    try:
+        get_db().execute("DELETE FROM tokens WHERE provider = 'google'")
+        get_db().commit()
+    except Exception:
+        pass
+    return redirect(url_for('auth_start'))
 
 
 @app.route('/logout', methods=['POST'])
@@ -424,6 +473,11 @@ def chat_view(chat_id):
     row = db.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
     if row is None:
         return "Chat not found", 404
+    from services.calendar.gcal_service import refresh_upcoming_cache
+    try:
+        refresh_upcoming_cache(db)
+    except Exception:
+        logger.exception("GCal upcoming cache refresh failed on chat view")
     messages = [dict(m) for m in db.execute(
         "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
         (chat_id,),
@@ -442,6 +496,7 @@ def chat_message(chat_id):
 
     data = request.get_json(force=True) or {}
     content = (data.get("content") or "").strip()
+    client_tz = data.get("timezone")
     if not content:
         return json.dumps({"error": "content is required"}), 400, {"Content-Type": "application/json"}
 
@@ -451,7 +506,7 @@ def chat_message(chat_id):
     ).fetchall()]
 
     try:
-        reply = _ai_service.chat(db, history + [{"role": "user", "content": content}])
+        reply = _ai_service.chat(db, history + [{"role": "user", "content": content}], client_tz=client_tz)
     except BudgetExceededError as e:
         logger.error("BUDGET EXCEEDED — AI disabled until server restart: %s", e)
         reply = str(e)
@@ -803,6 +858,309 @@ def vault_file_view(filepath):
     if request.args.get("raw"):
         return content, 200, {"Content-Type": "text/plain; charset=utf-8"}
     return render_template("vault_file.html", filepath=filepath, content=content)
+
+
+# ─── calendar ─────────────────────────────────────────────────────────────────
+
+def _cal_auth():
+    user = get_current_user()
+    if not user:
+        return None, redirect(url_for('login'))
+    return user, None
+
+
+def _json(data, status=200):
+    return json.dumps(data), status, {"Content-Type": "application/json"}
+
+
+@app.route("/calendar")
+def calendar_view():
+    _, redir = _cal_auth()
+    if redir:
+        return redir
+    db = get_db()
+    from services.calendar.gcal_service import is_connected, refresh_upcoming_cache
+    try:
+        refresh_upcoming_cache(db)
+    except Exception:
+        logger.exception("GCal upcoming cache refresh failed on calendar view")
+    local_cals = [dict(r) for r in db.execute("SELECT * FROM calendars ORDER BY name").fetchall()]
+    return render_template("calendar.html",
+                           local_cals=local_cals,
+                           local_cal_ids=[c['id'] for c in local_cals],
+                           gcal_connected=is_connected(db))
+
+
+@app.route("/calendar/api/events")
+def calendar_api_events():
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    start = request.args.get("start", "")
+    end = request.args.get("end", "")
+    if not start or not end:
+        return _json([])
+    show_tasks = request.args.get("show_tasks", "1") == "1"
+    local_cal_ids = [x for x in request.args.get("local_cal_ids", "").split(",") if x]
+    gcal_ids = [x for x in request.args.get("gcal_ids", "").split(",") if x]
+
+    events = []
+
+    # Local events
+    if local_cal_ids:
+        ph = ",".join("?" * len(local_cal_ids))
+        rows = db.execute(f"""
+            SELECT e.*, c.color, c.name as cal_name
+            FROM events e JOIN calendars c ON e.calendar_id = c.id
+            WHERE e.calendar_id IN ({ph})
+            AND e.start_datetime < ?
+            AND (e.end_datetime > ? OR (e.end_datetime IS NULL AND e.start_datetime >= ?))
+        """, local_cal_ids + [end, start, start]).fetchall()
+        for r in rows:
+            e = dict(r)
+            events.append({
+                "id": e["id"],
+                "title": e["title"],
+                "start": e["start_datetime"],
+                "end": e["end_datetime"],
+                "allDay": bool(e["all_day"]),
+                "backgroundColor": e["color"],
+                "borderColor": e["color"],
+                "editable": True,
+                "extendedProps": {
+                    "source": "local",
+                    "calendar_id": e["calendar_id"],
+                    "cal_name": e["cal_name"],
+                    "description": e["description"],
+                    "location": e["location"],
+                },
+            })
+
+    # Task deadlines as all-day events
+    if show_tasks:
+        task_rows = db.execute("""
+            SELECT id, title, due_date, priority FROM tasks
+            WHERE due_date IS NOT NULL AND status != 'done'
+            AND due_date >= ? AND due_date < ?
+        """, (start[:10], end[:10])).fetchall()
+        for t in task_rows:
+            td = dict(t)
+            events.append({
+                "id": f"task_{td['id']}",
+                "title": f"⚑ {td['title']}",
+                "start": td["due_date"],
+                "allDay": True,
+                "backgroundColor": "#ffb84a",
+                "borderColor": "#ffb84a",
+                "textColor": "#111111",
+                "editable": False,
+                "extendedProps": {"source": "task", "task_id": td["id"]},
+            })
+
+    # GCal events (live, read-only)
+    if gcal_ids:
+        from services.calendar.gcal_service import list_calendars as _gcal_cals, list_events as _gcal_events
+        color_map = {}
+        try:
+            for c in _gcal_cals(db):
+                color_map[c["id"]] = c.get("backgroundColor", "#4a9eff")
+        except Exception:
+            pass
+        for cal_id in gcal_ids:
+            try:
+                for e in _gcal_events(db, cal_id, start, end):
+                    s = e.get("start", {})
+                    en = e.get("end", {})
+                    all_day = "date" in s and "dateTime" not in s
+                    color = color_map.get(cal_id, "#4a9eff")
+                    events.append({
+                        "id": f"gcal_{e['id']}",
+                        "title": e.get("summary", "(no title)"),
+                        "start": s.get("dateTime") or s.get("date", ""),
+                        "end": en.get("dateTime") or en.get("date"),
+                        "allDay": all_day,
+                        "backgroundColor": color,
+                        "borderColor": color,
+                        "editable": False,
+                        "extendedProps": {
+                            "source": "gcal",
+                            "description": e.get("description"),
+                            "location": e.get("location"),
+                            "gcal_link": e.get("htmlLink"),
+                        },
+                    })
+            except Exception:
+                logger.exception("GCal event fetch failed for %s", cal_id)
+
+    return _json(events)
+
+
+@app.route("/calendar/api/gcal-calendars")
+def calendar_api_gcal_cals():
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    from services.calendar.gcal_service import list_calendars
+    return _json(list_calendars(get_db()))
+
+
+@app.route("/calendar/api/events", methods=["POST"])
+def calendar_api_create_event():
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return _json({"error": "title is required"}, 400)
+    cal_id = data.get("calendar_id")
+    if not cal_id:
+        first = db.execute("SELECT id FROM calendars ORDER BY created_at LIMIT 1").fetchone()
+        if not first:
+            return _json({"error": "No local calendars exist — create one first"}, 400)
+        cal_id = first["id"]
+    new_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """INSERT INTO events
+           (id, calendar_id, title, description, start_datetime, end_datetime, all_day, location, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (new_id, cal_id, title, data.get("description"),
+         data.get("start_datetime"), data.get("end_datetime"),
+         int(bool(data.get("all_day", False))), data.get("location"), now, now),
+    )
+    db.commit()
+    return _json({"ok": True, "id": new_id})
+
+
+@app.route("/calendar/api/events/<event_id>")
+def calendar_api_get_event(event_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    row = get_db().execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if not row:
+        return _json({"error": "Not found"}, 404)
+    return _json(dict(row))
+
+
+@app.route("/calendar/api/events/<event_id>", methods=["POST"])
+def calendar_api_update_event(event_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    allowed = {"title", "description", "start_datetime", "end_datetime", "all_day", "location", "calendar_id"}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if "all_day" in updates:
+        updates["all_day"] = int(bool(updates["all_day"]))
+    if not updates:
+        return _json({"error": "Nothing to update"}, 400)
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    db.execute(f"UPDATE events SET {set_clause} WHERE id = ?", [*updates.values(), event_id])
+    db.commit()
+    return _json({"ok": True})
+
+
+@app.route("/calendar/api/events/<event_id>/delete", methods=["POST"])
+def calendar_api_delete_event(event_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    db.commit()
+    return _json({"ok": True})
+
+
+@app.route("/calendar/api/calendars")
+def calendar_api_list_cals():
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    rows = get_db().execute("SELECT * FROM calendars ORDER BY name").fetchall()
+    return _json([dict(r) for r in rows])
+
+
+@app.route("/calendar/api/calendars", methods=["POST"])
+def calendar_api_create_cal():
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return _json({"error": "name is required"}, 400)
+    new_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    ics_url = data.get("ics_url") or None
+    db.execute(
+        """INSERT INTO calendars (id, name, color, source, ics_url, visible, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+        (new_id, name, data.get("color", "#4a9eff"), "ics" if ics_url else "local", ics_url, now, now),
+    )
+    db.commit()
+    if ics_url:
+        try:
+            from services.calendar.ics_service import fetch_and_store
+            fetch_and_store(db, new_id, ics_url)
+        except Exception as e:
+            logger.exception("ICS initial fetch failed for %s", ics_url)
+            return _json({"ok": True, "id": new_id, "warning": f"Calendar created but ICS import failed: {e}"})
+    return _json({"ok": True, "id": new_id})
+
+
+@app.route("/calendar/api/calendars/<cal_id>", methods=["POST"])
+def calendar_api_update_cal(cal_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    allowed = {"name", "color", "visible"}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return _json({"error": "Nothing to update"}, 400)
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    db.execute(f"UPDATE calendars SET {set_clause} WHERE id = ?", [*updates.values(), cal_id])
+    db.commit()
+    return _json({"ok": True})
+
+
+@app.route("/calendar/api/calendars/<cal_id>/delete", methods=["POST"])
+def calendar_api_delete_cal(cal_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    db.execute("DELETE FROM events WHERE calendar_id = ?", (cal_id,))
+    db.execute("DELETE FROM calendars WHERE id = ?", (cal_id,))
+    db.commit()
+    return _json({"ok": True})
+
+
+@app.route("/calendar/api/calendars/<cal_id>/sync", methods=["POST"])
+def calendar_api_sync_cal(cal_id):
+    _, redir = _cal_auth()
+    if redir:
+        return _json({"error": "Unauthorized"}, 401)
+    db = get_db()
+    row = db.execute("SELECT ics_url FROM calendars WHERE id = ?", (cal_id,)).fetchone()
+    if not row or not row["ics_url"]:
+        return _json({"error": "No ICS URL for this calendar"}, 400)
+    try:
+        from services.calendar.ics_service import fetch_and_store
+        count = fetch_and_store(db, cal_id, row["ics_url"])
+        return _json({"ok": True, "imported": count})
+    except Exception as e:
+        logger.exception("ICS sync failed for calendar %s", cal_id)
+        return _json({"error": str(e)}, 500)
 
 
 def _start_rag():

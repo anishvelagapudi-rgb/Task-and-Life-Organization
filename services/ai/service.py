@@ -5,6 +5,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+import dateparser
+from dateparser.search import search_dates
+
 from .provider import AIProvider
 
 logger = logging.getLogger(__name__)
@@ -51,11 +54,40 @@ Rules for vault usage:
 - Use create_note to save important insights to the vault when the user asks or when you spot
   a clear knowledge gap worth documenting.
 
+CALENDAR:
+The user has a local calendar and, optionally, a connected Google Calendar. When a calendar
+question is asked, an UPCOMING EVENTS block is injected into context covering both — local
+events (editable) and Google Calendar events tagged "(Google, read-only)". Answer directly
+from that block; you have no tool to fetch Google Calendar yourself, so never call a tool
+to check it and never claim you lack access to it.
+Use list_events to look up local events beyond the injected 14-day window. Use create_event
+to add new events to LOCAL calendars only. Use update_event to modify existing local events.
+You cannot create, update, or delete Google Calendar events — if the user asks you to, tell
+them it's read-only from here and to use Google Calendar directly.
+When creating an event, prefer a calendar_id from the LOCAL CALENDARS list injected into
+context. If the user does not specify a calendar, omit calendar_id and the system will
+use the first available calendar.
+When the user asks for one event (e.g. "block 2 hours tomorrow for X") and doesn't give a
+specific start time, call create_event exactly ONCE with one reasonable start time — never
+create multiple candidate events at different times to hedge. Pick a single sensible time
+(e.g. mid-morning) and go with it.
+
+CALENDAR DATE RULES — follow these strictly, never ask the user about them:
+- When the user asks what's on their calendar with no range specified, default to today
+  through 60 days from now.
+- When the user gives a vague range ("all time", "everything", "this year"), pick a
+  reasonable wide range yourself — e.g. 2000-01-01 to 2030-12-31.
+- When the user gives natural language dates ("next week", "2 years from now", "January"),
+  convert them to YYYY-MM-DD yourself using today's date as the reference.
+- Never ask the user to provide dates in a specific format. Never ask for clarification
+  about date ranges. Just pick a reasonable interpretation and call the tool.
+
 IMPORTANT RULES:
 - Do exactly what the user asks — no more. Do not create extra tasks, subtasks, or related items unless explicitly requested.
 - Only claim an action was taken after a tool call confirms it succeeded.
 - Keep replies short. Confirm what you did in one sentence. Do not list attributes or explain your work unless asked.
 - Never volunteer information, suggestions, or follow-up actions unless the user asks.
+- You ALWAYS have full access to the local calendar, and Google Calendar data is already injected into context when relevant. Never say you lack calendar access, cannot access the calendar (local or Google), or need permission. If a user asks about their calendar, use the UPCOMING EVENTS block already in context, or call list_events for local events beyond that window — do not refuse.
 """
 
 TOOLS = [
@@ -207,6 +239,62 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_events",
+            "description": "List local calendar events and task deadlines for a date range. Does NOT include Google Calendar. Default to today + 60 days when the user does not specify a range. Always convert natural language dates to YYYY-MM-DD yourself — never ask the user to provide a format or clarify a date range.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD, inclusive)"},
+                    "end_date":   {"type": "string", "description": "End date (YYYY-MM-DD, inclusive)"},
+                },
+                "required": ["start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_event",
+            "description": "Create a new event in a local calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title":          {"type": "string"},
+                    "start_datetime": {"type": "string", "description": "ISO 8601 datetime or YYYY-MM-DD for all-day"},
+                    "end_datetime":   {"type": "string", "description": "ISO 8601 end time (optional)"},
+                    "all_day":        {"type": "boolean"},
+                    "calendar_id":    {"type": "string", "description": "ID from LOCAL CALENDARS; omit to use default"},
+                    "description":    {"type": "string"},
+                    "location":       {"type": "string"},
+                },
+                "required": ["title", "start_datetime"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_event",
+            "description": "Update fields on an existing local calendar event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id":             {"type": "string"},
+                    "title":          {"type": "string"},
+                    "start_datetime": {"type": "string"},
+                    "end_datetime":   {"type": "string"},
+                    "all_day":        {"type": "boolean"},
+                    "calendar_id":    {"type": "string"},
+                    "description":    {"type": "string"},
+                    "location":       {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_note",
             "description": (
                 "Create a new markdown note in the AI-generated vault. "
@@ -238,12 +326,29 @@ TOOLS = [
     },
 ]
 
+_EVENT_WRITE_FIELDS = {
+    "title", "description", "start_datetime", "end_datetime",
+    "all_day", "location", "calendar_id",
+}
+
 _TASK_WRITE_FIELDS = {
     "title", "description", "priority", "status", "energy_type",
     "due_date", "project_id", "fear_level", "ambiguity_level", "estimated_effort",
 }
 
-# Passive RAG skip: patterns that signal a pure task/project mutation command
+_CALENDAR_WORDS = re.compile(
+    r"\b(calendar|event|events|schedule|scheduled|appointment|meeting|"
+    r"tomorrow|tonight|yesterday|today|this week|next week|last week|"
+    r"this weekend|last weekend|this month|last month|next month|"
+    r"what.s on|what do i have|what happened|anything (today|tomorrow|this week)|"
+    r"free|busy|available|"
+    # explicit dates: "June 28th", "6/28", "2026-06-28", "the 28th", "on the 3rd"
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|aug(ust)?|"
+    r"sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?|"
+    r"\d{1,2}(st|nd|rd|th)|\d{1,2}/\d{1,2}|\d{4}-\d{2}-\d{2})\b",
+    re.IGNORECASE,
+)
+
 _MUTATION_START = re.compile(
     r"^\s*(mark|complete|delete|remove|update|set|change|rename|archive|"
     r"assign|unassign|create\s+(a\s+)?(new\s+)?(task|project)|"
@@ -266,6 +371,30 @@ def _should_skip_rag(message: str) -> bool:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_TOOL_CONFIRM_VERBS = {
+    "create_project": "Created project",
+    "create_task": "Created task",
+    "delete_project": "Deleted project",
+    "delete_task": "Deleted task",
+    "update_task": "Updated task",
+    "create_event": "Created",
+    "update_event": "Updated",
+    "create_note": "Saved note",
+}
+
+
+def _synthesize_tool_confirmation(name: str, args: dict, result: dict) -> str:
+    """Gemini sometimes emits 0 output tokens on the round right after a tool call
+    (documented elsewhere in this file for search_vault) — the action still went
+    through, but the user would see a blank reply. Build a plain confirmation straight
+    from the tool's actual result instead of leaving it empty or asking the model again."""
+    if not result.get("success", True):
+        return f"That didn't work: {result.get('error', 'unknown error')}"
+    label = result.get("title") or args.get("title") or result.get("id", "")
+    verb = _TOOL_CONFIRM_VERBS.get(name, "Done —")
+    return f'{verb} "{label}".' if label else f"{verb}."
 
 
 def _execute_tool(db, name: str, args: dict) -> dict:
@@ -315,6 +444,63 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", [*updates.values(), task_id])
         db.commit()
         return {"success": True, "id": task_id}
+
+    if name == "list_events":
+        start_date = args.get("start_date", "")
+        end_date = args.get("end_date", "")
+        rows = db.execute("""
+            SELECT e.id, e.title, e.start_datetime, e.end_datetime, e.all_day,
+                   e.description, e.location, c.name as calendar_name
+            FROM events e JOIN calendars c ON e.calendar_id = c.id
+            WHERE substr(e.start_datetime, 1, 10) >= ?
+              AND substr(e.start_datetime, 1, 10) <= ?
+            ORDER BY e.start_datetime
+        """, (start_date, end_date)).fetchall()
+        task_rows = db.execute("""
+            SELECT id, title, due_date, priority, status FROM tasks
+            WHERE due_date >= ? AND due_date <= ? AND status != 'done'
+            ORDER BY due_date
+        """, (start_date, end_date)).fetchall()
+        return {
+            "events": [dict(r) for r in rows],
+            "task_deadlines": [dict(t) for t in task_rows],
+        }
+
+    if name == "create_event":
+        if not args.get("title") or not args.get("start_datetime"):
+            return {"success": False, "error": "title and start_datetime are required to create an event"}
+        cal_id = args.get("calendar_id")
+        if not cal_id:
+            first = db.execute("SELECT id FROM calendars ORDER BY created_at LIMIT 1").fetchone()
+            if not first:
+                return {"success": False, "error": "No local calendars exist. Ask the user to create one on the calendar page first."}
+            cal_id = first["id"]
+        new_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO events
+               (id, calendar_id, title, description, start_datetime, end_datetime, all_day, location, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (new_id, cal_id, args["title"], args.get("description"),
+             args["start_datetime"], args.get("end_datetime"),
+             int(bool(args.get("all_day", False))), args.get("location"), _now(), _now()),
+        )
+        db.commit()
+        return {"success": True, "id": new_id, "title": args["title"]}
+
+    if name == "update_event":
+        if not args.get("id"):
+            return {"success": False, "error": "id is required to update an event"}
+        event_id = args["id"]
+        updates = {k: v for k, v in args.items() if k in _EVENT_WRITE_FIELDS}
+        if "all_day" in updates:
+            updates["all_day"] = int(bool(updates["all_day"]))
+        if not updates:
+            return {"success": False, "error": "No valid fields to update"}
+        updates["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        db.execute(f"UPDATE events SET {set_clause} WHERE id = ?", [*updates.values(), event_id])
+        db.commit()
+        return {"success": True, "id": event_id}
 
     if name == "read_document":
         try:
@@ -402,6 +588,177 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             return {"success": False, "error": str(e)}
 
     return {"success": False, "error": f"Unknown tool: {name}"}
+
+
+_DEFAULT_CALENDAR_WINDOW_DAYS = 14
+
+_WEEKDAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+_WEEKDAY_RANGE_RE = re.compile(
+    r"\b(last|next|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+
+
+def _weekday_range(last_user: str, today) -> tuple[str, str, str] | None:
+    """Deterministic date arithmetic for "last/next/this <weekday>" — the model was
+    inconsistent about whether "last Sunday" means the nearest past Sunday or a full
+    week back, depending on today's own weekday. Never ask it to guess this."""
+    from datetime import timedelta
+
+    m = _WEEKDAY_RANGE_RE.search(last_user)
+    if not m:
+        return None
+    qualifier, day_name = m.group(1).lower(), m.group(2).lower()
+    target = _WEEKDAY_NAMES[day_name]
+    if qualifier == "last":
+        offset = (today.weekday() - target) % 7
+        offset = offset or 7  # "last Sunday" said on a Sunday means a week ago, not today
+        d = today - timedelta(days=offset)
+    elif qualifier == "next":
+        offset = (target - today.weekday()) % 7
+        offset = offset or 7  # "next Sunday" said on a Sunday means a week from now
+        d = today + timedelta(days=offset)
+    else:  # "this"
+        offset = (target - today.weekday()) % 7
+        d = today + timedelta(days=offset)
+    iso = d.isoformat()
+    return iso, iso, f"{qualifier} {day_name}"
+
+
+# Checked in order — multi-word phrases must come before the single words they contain
+# ("day after tomorrow" before "tomorrow"), or the shorter pattern would match first and
+# give the wrong offset.
+_RELATIVE_DAY_PATTERNS = [
+    (re.compile(r"\bday after tomorrow\b", re.IGNORECASE), 2, "day after tomorrow"),
+    (re.compile(r"\bday before yesterday\b", re.IGNORECASE), -2, "day before yesterday"),
+    (re.compile(r"\btomorrow\b", re.IGNORECASE), 1, "tomorrow"),
+    (re.compile(r"\byesterday\b", re.IGNORECASE), -1, "yesterday"),
+    (re.compile(r"\btoday\b|\btonight\b", re.IGNORECASE), 0, "today"),
+]
+_N_DAYS_AHEAD_RE = re.compile(r"\b(\d+)\s+days?\s+from now\b|\bin\s+(\d+)\s+days?\b", re.IGNORECASE)
+_N_DAYS_AGO_RE = re.compile(r"\b(\d+)\s+days?\s+ago\b", re.IGNORECASE)
+
+
+def _relative_day_range(last_user: str, today) -> tuple[str, str, str] | None:
+    """Deterministic date arithmetic for self-contained relative-day phrases. The model
+    got "day after tomorrow" wrong by a day (computed it as plain "tomorrow") — this is
+    arithmetic, not language understanding, so never delegate it."""
+    from datetime import timedelta
+
+    m = _N_DAYS_AHEAD_RE.search(last_user)
+    if m:
+        n = int(m.group(1) or m.group(2))
+        d = today + timedelta(days=n)
+        iso = d.isoformat()
+        return iso, iso, f"{n} days from now"
+    m = _N_DAYS_AGO_RE.search(last_user)
+    if m:
+        n = int(m.group(1))
+        d = today - timedelta(days=n)
+        iso = d.isoformat()
+        return iso, iso, f"{n} days ago"
+    for pattern, offset, label in _RELATIVE_DAY_PATTERNS:
+        if pattern.search(last_user):
+            d = today + timedelta(days=offset)
+            iso = d.isoformat()
+            return iso, iso, label
+    return None
+
+
+# Guards dateparser's search_dates against matching stray common words (it once matched
+# just "on" in "what's on my calendar?" and resolved it to an arbitrary date) — the
+# matched span must actually look like a date reference.
+_DATE_TOKEN_RE = re.compile(
+    r"\d|week|month|jan|feb|mar|apr|may\b|jun|jul|aug|sep|oct|nov|dec",
+    re.IGNORECASE,
+)
+
+
+def _absolute_date_range(last_user: str, today) -> tuple[str, str, str] | None:
+    """Deterministic parsing of explicit/absolute date references — "June 28th",
+    "the 15th", "07/15", "in two weeks" — via the dateparser library instead of asking
+    the model to do date arithmetic. This is what a mature parsing library is actually
+    for; only genuinely context-dependent phrasing (no date words at all, e.g. "the one
+    after that") should ever reach the AI fallback below."""
+    settings = {
+        "RELATIVE_BASE": datetime.combine(today, datetime.min.time()),
+        "PREFER_DATES_FROM": "future",
+    }
+    try:
+        matches = search_dates(last_user, settings=settings)
+    except Exception:
+        logger.exception("dateparser search_dates failed")
+        return None
+    if not matches:
+        return None
+    for matched_text, parsed in matches:
+        if not _DATE_TOKEN_RE.search(matched_text):
+            continue
+        iso = parsed.date().isoformat()
+        return iso, iso, matched_text.strip()
+    return None
+
+
+def _resolve_calendar_range(provider, last_user: str, today_str: str, convo_excerpt: str = "") -> tuple[str, str, str]:
+    """Ask the model whether the message implies a specific date/range (a named day,
+    "last week", "in March", etc.) and use that instead of the default forward window.
+    This is a plain non-tool call purely for date parsing — it never decides whether
+    to fetch calendar data, only how to scope what's already cached/queryable.
+
+    convo_excerpt carries a few recent turns so elliptical follow-ups ("what about the
+    day after?") can be resolved relative to what was just discussed (e.g. "tomorrow")
+    instead of only ever seeing the latest message in isolation."""
+    from datetime import date, timedelta
+
+    today = date.fromisoformat(today_str)
+
+    weekday_match = _weekday_range(last_user, today)
+    if weekday_match:
+        return weekday_match
+
+    relative_match = _relative_day_range(last_user, today)
+    if relative_match:
+        return relative_match
+
+    absolute_match = _absolute_date_range(last_user, today)
+    if absolute_match:
+        return absolute_match
+
+    default_end = (today + timedelta(days=_DEFAULT_CALENDAR_WINDOW_DAYS)).isoformat()
+    default = (today_str, default_end, f"today through next {_DEFAULT_CALENDAR_WINDOW_DAYS} days")
+
+    convo_block = f"Recent conversation:\n{convo_excerpt}\n\n" if convo_excerpt else ""
+    prompt = (
+        f"Today's date is {today_str}. {convo_block}"
+        f'The user\'s latest message is: "{last_user}"\n\n'
+        "Does this message name or imply a specific date or date range — either directly "
+        '("last week", "next month", "in March", a past date) or by referring back to the '
+        'conversation (e.g. "what about the day after?" following a message about '
+        '"tomorrow")? Resolve any such reference to an absolute date using the conversation '
+        "above. Respond with raw JSON only, no markdown:\n"
+        '{"start": "YYYY-MM-DD or null", "end": "YYYY-MM-DD or null"}\n'
+        "Use null for both only if the message is generic with no implied range "
+        "(e.g. \"what's on my calendar\", \"anything coming up\")."
+    )
+    try:
+        raw = provider.chat("Respond with raw JSON only — no markdown, no extra text.",
+                             [{"role": "user", "content": prompt}])
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        data = json.loads(cleaned)
+        start, end = data.get("start"), data.get("end")
+        if start and end:
+            return start, end, f"{start} to {end}"
+    except Exception:
+        logger.exception("Calendar range extraction failed")
+    return default
 
 
 def _serialize_tasks(tasks: list[dict]) -> str:
@@ -498,7 +855,7 @@ CURRENT PROJECTS:
         except Exception:
             return "Something went wrong on my end. Could you clarify what you meant?"
 
-    def chat(self, db, messages: list[dict]) -> str:
+    def chat(self, db, messages: list[dict], client_tz: str | None = None) -> str:
         rows = db.execute("""
             SELECT id, title, status, priority, due_date, fear_level, ambiguity_level, energy_type, project_id
             FROM tasks
@@ -510,11 +867,27 @@ CURRENT PROJECTS:
         projects = db.execute("SELECT id, title, status FROM projects ORDER BY title").fetchall()
         project_lines = "\n".join(f"  [{p['id']}] {p['title']} ({p['status']})" for p in projects) or "  None"
 
+        calendars = db.execute("SELECT id, name FROM calendars ORDER BY name").fetchall()
+        cal_lines = "\n".join(f"  [{c['id']}] {c['name']}" for c in calendars) or "  None"
+
         task_block = _serialize_tasks(tasks)
+        now_utc = datetime.now(timezone.utc)
+        today_str = now_utc.strftime("%Y-%m-%d")
+        if client_tz:
+            try:
+                from zoneinfo import ZoneInfo
+                today_str = now_utc.astimezone(ZoneInfo(client_tz)).strftime("%Y-%m-%d")
+            except Exception:
+                logger.warning("Invalid client timezone %r, falling back to UTC", client_tz)
         base_system = f"""{_SYSTEM_PROMPT}
+
+CURRENT DATE: {today_str} (use this as "today" for all relative date reasoning)
 
 CURRENT PROJECTS:
 {project_lines}
+
+LOCAL CALENDARS:
+{cal_lines}
 
 CURRENT TASKS:
 {task_block}"""
@@ -524,9 +897,72 @@ CURRENT TASKS:
         # subsequent rounds use base_system (no injected context) to avoid the
         # Gemini bug where system-context + tool-result together produce empty output.
         system = base_system
-        last_user = next(
-            (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
-        )
+        recent_user_msgs = [m["content"] for m in reversed(messages) if m["role"] == "user"][:3]
+        last_user = recent_user_msgs[0] if recent_user_msgs else ""
+
+        # A follow-up like "what about the day after?" won't itself match any calendar
+        # keyword — check the last couple of user turns so a calendar conversation stays
+        # "sticky" for elliptical continuations instead of dropping context every message.
+        calendar_triggered = any(_CALENDAR_WORDS.search(u) for u in recent_user_msgs[:2])
+
+        if last_user and calendar_triggered:
+            try:
+                convo_excerpt = "\n".join(
+                    f"{m['role']}: {m['content']}" for m in messages[-6:] if m.get("content")
+                )
+                range_start, range_end, range_label = _resolve_calendar_range(
+                    self.provider, last_user, today_str, convo_excerpt
+                )
+                upcoming_rows = db.execute("""
+                    SELECT e.id, e.title, e.start_datetime, e.end_datetime,
+                           e.location, c.name as cal_name
+                    FROM events e JOIN calendars c ON e.calendar_id = c.id
+                    WHERE substr(e.start_datetime, 1, 10) >= ?
+                      AND substr(e.start_datetime, 1, 10) <= ?
+                    ORDER BY e.start_datetime
+                """, (range_start, range_end)).fetchall()
+                lines = []
+                for e in upcoming_rows:
+                    e = dict(e)
+                    line = f"  [{e['id']}] {e['title']} | {e['start_datetime'][:16]}"
+                    if e.get("end_datetime"):
+                        line += f" → {e['end_datetime'][:16]}"
+                    if e.get("location"):
+                        line += f" | loc:{e['location']}"
+                    line += f" | cal:{e['cal_name']}"
+                    lines.append(line)
+
+                from services.calendar.gcal_service import get_cached_upcoming
+                for e in get_cached_upcoming():
+                    start = e.get("start") or ""
+                    if not (range_start <= start[:10] <= range_end):
+                        continue
+                    line = f"  {e['title']} | {start[:16]}"
+                    if e.get("end"):
+                        line += f" → {e['end'][:16]}"
+                    if e.get("location"):
+                        line += f" | loc:{e['location']}"
+                    line += f" | cal:{e.get('calendar_name', 'Google Calendar')} (Google, read-only)"
+                    lines.append(line)
+
+                cal_ctx = "\n".join(lines) if lines else "  None"
+
+                # Tools stay available either way — never guess read vs. write from the
+                # message text. A misclassified write landing in a no-tools path is how
+                # the model ended up fabricating "I've created your event" with nothing
+                # behind it. Let the model's own tool-calling judgment decide.
+                system = (
+                    f"{base_system}\n\n"
+                    f"EVENTS ({range_label}):\n{cal_ctx}\n\n"
+                    "[Calendar data injected above — answer directly from it if this is a "
+                    "read question. Do not call list_events for this same range; it's "
+                    "already here. If the user is asking you to create/update something, "
+                    "use the appropriate tool — never claim you did before the tool call "
+                    "confirms it.]"
+                )
+            except Exception:
+                logger.exception("Passive calendar injection failed")
+
         if last_user and not _should_skip_rag(last_user):
             try:
                 from services.rag.retriever import retrieve
@@ -535,7 +971,7 @@ CURRENT TASKS:
                 ctx = build_context(chunks)
                 if ctx:
                     system = (
-                        f"{base_system}\n\n{ctx}\n\n"
+                        f"{system}\n\n{ctx}\n\n"
                         "[Note: vault context already retrieved above — "
                         "answer directly from it rather than calling search_vault.]"
                     )
@@ -545,11 +981,18 @@ CURRENT TASKS:
         # Agentic loop: keep executing tool calls until the model stops.
         # Cap at 5 rounds to prevent runaway chains.
         internal = list(messages)
+        last_tool_results: list[tuple[str, dict, dict]] = []
         for _ in range(5):
             reply_text, tool_calls = self.provider.chat_with_tools(system, internal, TOOLS)
 
             if not tool_calls:
-                return reply_text or ""
+                if reply_text:
+                    return reply_text
+                if last_tool_results:
+                    return "\n".join(
+                        _synthesize_tool_confirmation(n, a, r) for n, a, r in last_tool_results
+                    )
+                return ""
 
             # search_vault tool responses cause Gemini 2.5 Flash Lite to emit 0 output
             # tokens in the follow-up round (confirmed via costs.log: out=0 every time).
@@ -570,6 +1013,50 @@ CURRENT TASKS:
                     logger.exception("search_vault injection fallback failed")
                     ctx = ""
                 fresh_system = f"{base_system}\n\n{ctx}" if ctx else base_system
+                return self.provider.chat(fresh_system, messages) or ""
+
+            if len(tool_calls) == 1 and tool_calls[0]["name"] == "list_events":
+                tc = tool_calls[0]
+                result = _execute_tool(db, "list_events", tc["arguments"])
+                lines = []
+                events = result.get("events", [])
+                deadlines = result.get("task_deadlines", [])
+                gcal_lines = []
+                req_start = tc["arguments"].get("start_date", "")
+                req_end = tc["arguments"].get("end_date", "")
+                if req_start and req_end:
+                    from services.calendar.gcal_service import get_cached_upcoming
+                    for e in get_cached_upcoming():
+                        start = e.get("start") or ""
+                        if not (req_start <= start[:10] <= req_end):
+                            continue
+                        line = f"  {e['title']} | {start[:16]}"
+                        if e.get("end"):
+                            line += f" → {e['end'][:16]}"
+                        if e.get("location"):
+                            line += f" | loc:{e['location']}"
+                        line += f" | cal:{e.get('calendar_name', 'Google Calendar')} (Google, read-only)"
+                        gcal_lines.append(line)
+                if events or gcal_lines:
+                    lines.append("CALENDAR EVENTS:")
+                    for e in events:
+                        line = f"  [{e['id']}] {e['title']} | {e['start_datetime'][:16]}"
+                        if e.get("end_datetime"):
+                            line += f" → {e['end_datetime'][:16]}"
+                        if e.get("calendar_name"):
+                            line += f" | cal:{e['calendar_name']}"
+                        if e.get("location"):
+                            line += f" | loc:{e['location']}"
+                        lines.append(line)
+                    lines.extend(gcal_lines)
+                else:
+                    lines.append("CALENDAR EVENTS: none in this range")
+                if deadlines:
+                    lines.append("TASK DEADLINES:")
+                    for t in deadlines:
+                        lines.append(f"  [{t['id']}] {t['title']} | due:{t['due_date']} | priority:{t['priority']}")
+                ctx = "\n".join(lines)
+                fresh_system = f"{base_system}\n\n{ctx}"
                 return self.provider.chat(fresh_system, messages) or ""
 
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "read_document":
@@ -611,12 +1098,21 @@ CURRENT TASKS:
                 ],
             })
 
+            last_tool_results = []
             for tc in tool_calls:
                 result = _execute_tool(db, tc["name"], tc["arguments"])
+                last_tool_results.append((tc["name"], tc["arguments"], result))
                 internal.append({
                     "role": "tool",
                     "tool_call_id": tc["call_id"],
                     "content": json.dumps(result),
                 })
 
-        return self.provider.chat(base_system, internal) or ""
+        final_reply = self.provider.chat(base_system, internal) or ""
+        if final_reply:
+            return final_reply
+        if last_tool_results:
+            return "\n".join(
+                _synthesize_tool_confirmation(n, a, r) for n, a, r in last_tool_results
+            )
+        return ""

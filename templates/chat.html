@@ -240,7 +240,10 @@
       const res = await fetch(`/chat/${CHAT_ID}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text }),
+        body: JSON.stringify({
+          content: text,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
       });
 
       thinking.remove();
