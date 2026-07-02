@@ -4,12 +4,48 @@ This is NOT a SaaS app.
 This is NOT a scalable startup.
 This is NOT a generic productivity tool.
 This is NOT an Obsidian plugin.
+This is NOT a tool designed to make the user dependent on it.
 
-This is a private, self-hosted cognitive infrastructure system. Its purpose is to know the user — their tasks, their knowledge, their thinking patterns, their relationships, their goals — and act as an intelligent execution and reasoning assistant across all of it.
+This is a private, self-hosted cognitive infrastructure system. Its purpose
+is to know the user — their tasks, their knowledge, their thinking patterns,
+their relationships, their goals — and act as an intelligent execution and
+reasoning assistant across all of it.
 
-The system has ONE user. Every design decision should optimize for that user's experience, not for generalizability.
+The system has ONE user, indefinitely. Every design decision should optimize
+for that user's experience, not for generalizability. A second user is not
+being designed for, now or later — don't build multi-tenancy scaffolding.
 
-This project also serves as a learning platform. The user's approach is: build the full system quickly with AI assistance, then replace each component one at a time with a version they wrote themselves (the Ship of Theseus method). A replacement is only valid if the app retains full functionality and all tests pass. Write code with clean, narrow interfaces between components so each one can be swapped independently. The RAG pipeline is the primary target for this.
+This project also serves as a learning platform. The user's approach is:
+build the full system quickly with AI assistance, then replace each
+component one at a time with a version they wrote themselves (the Ship of
+Theseus method). A replacement is only valid if the app retains full
+functionality and all tests pass. Write code with clean, narrow interfaces
+between components so each one can be swapped independently.
+
+====================================================
+THE ACTUAL DESIGN GOAL (READ THIS FIRST)
+====================================================
+
+The system does not exist to be used forever. It exists to eliminate
+friction NOW, while training the user to need it LESS over time. Success
+is not "the user opens this app every day for years." Success looks like:
+the user becomes someone who can do this in their head, faster, within
+about a year — and if they walked away from the tool entirely, they'd be
+smarter and faster for having used it, not worse off.
+
+Concretely, this means:
+- Optimize ruthlessly for reducing friction to zero, not for feature depth.
+- Never gamify, never nudge for engagement, never manufacture a reason to
+  open the app that isn't genuinely useful in the moment.
+- The dashboard's job is to get the user moving in the first 30 seconds.
+  After that, the user should be locked into the work itself — the app is
+  not supposed to keep talking to them once they've started.
+- Every AI action must be visible to the user. The AI operates like a
+  trusted intern reporting to a CEO: it can act, but the user always knows
+  what it did and why. Nothing happens silently.
+- Autonomy is earned incrementally. Start conservative (e.g. read-only
+  Google Calendar), expand write access only after the system has proven
+  reliable in narrower scopes.
 
 ====================================================
 WHAT THIS SYSTEM ACTUALLY IS
@@ -18,21 +54,30 @@ WHAT THIS SYSTEM ACTUALLY IS
 A personal AI second brain with three integrated capabilities:
 
 1. KNOWLEDGE LAYER
-   The user's entire knowledge base — class notes, personal journal,
-   notes on people they know, project planning, goals, ideas, reference
-   material, AI-generated notes — stored as markdown, indexed with
-   embeddings, queryable via RAG.
+   The user's entire life context — class notes, personal journal, notes on
+   people they know, project context, goals, reference material, school
+   calendar/courses/what they already know and are learning, AI-generated
+   notes — stored as markdown, indexed with embeddings, queryable via RAG.
+   This is not just "notes the user chose to write down" — it's meant to be
+   a dump of everything about the user's life and context that a generic AI
+   assistant would otherwise have no access to.
 
 2. EXECUTION LAYER
-   A psychologically-aware task management system. Tasks have fear
-   levels, ambiguity scores, energy types, and dependency relationships.
-   The dashboard answers one question: "what should I do right now?"
+   A lightweight task/project system. Tasks and projects are simple on the
+   surface (title, description, status, due date) — the psychological
+   modeling (fear, ambiguity, energy, effort) still exists, but it is
+   inferred by the AI in the background, never a form the user fills out.
+   The dashboard answers one question: "what should I do right now?" — and
+   specifically, it should get the user started, not micromanage them
+   through the whole task.
 
 3. INTELLIGENCE LAYER
-   An AI assistant (currently Gemini 2.5 Flash via google-genai SDK)
-   that bridges both layers. It reads the knowledge base via RAG,
-   reads and mutates tasks via tools, generates new notes when gaps
-   exist, and acts as a cognitive copilot that knows the user deeply.
+   An AI assistant (currently Gemini 2.5 Flash Lite via google-genai SDK)
+   that bridges both layers. It reads the knowledge base via RAG, reads and
+   mutates tasks via tools, generates new notes when gaps exist (with
+   approval), and reasons across everything it knows about the user's
+   context — but it never acts invisibly, and it never makes the user more
+   dependent on it than they need to be.
 
 These three layers are not separate apps. They are one system.
 
@@ -40,24 +85,28 @@ These three layers are not separate apps. They are one system.
 THE USER'S ACTUAL BEHAVIORAL PROBLEMS
 ====================================================
 
-The system exists to solve real problems:
-
-- Obligations scattered across Canvas, email, memory, and nowhere
-- Fear-based procrastination on ambiguous tasks
-- Losing context when switching between school, clubs, and personal projects
-- No single place that knows everything about their life and thinking
-- AI assistants that forget everything between sessions
-- Having to re-explain context every time they open a chat
-
-The system should feel like talking to an assistant that has known you
-for years and has read everything you've ever written.
+- No single place that knows their entire life — this is the deepest real
+  problem. Everything else is downstream of this.
+- Obligations scattered across Canvas, email, memory, and nowhere.
+- Things genuinely get put off until the last minute unless someone else is
+  holding the user accountable — the system needs to functionally replace
+  that external accountability.
+- Existing tools (Notion, Obsidian, etc.) assume a user willing to build and
+  maintain their own system. That's not this user. Anything that requires
+  learning a system or manually writing everything down as structured notes
+  will not get used. Friction is the #1 reason tools like this get abandoned.
+- NOT a real problem (confirmed, do not over-solve): the AI forgetting
+  context between chat sessions. The user already knows what info is needed
+  each time they prompt and adjusts accordingly. Persistent chat history is
+  fine to keep since it's already built and cheap, but it is not a priority
+  to invest further in.
 
 ====================================================
-CURRENT STACK (DO NOT CHANGE THESE)
+CURRENT STACK (DO NOT CHANGE THESE FOR NOW)
 ====================================================
 
 Backend:        Flask (Python)
-Database:       SQLite via raw SQL (dev.db) — do NOT migrate to MySQL
+Database:       SQLite via raw SQL (dev.db)
 Templates:      Jinja2 server-rendered HTML
 AI Provider:    Gemini 2.5 Flash Lite via google-genai SDK
 Auth:           Google OAuth 2.0 (Authlib), single-owner email gate
@@ -65,240 +114,149 @@ Vector Store:   ChromaDB (local, persisted to disk)
 Embeddings:     Gemini text-embedding-004
 Config:         .env file
 
-The SQLite + raw SQL decision is intentional and permanent for this
-project. Single user, no concurrent writes, zero operational overhead.
-Do not suggest or introduce SQLAlchemy, Flask-Migrate, or MySQL.
+SQLite + raw SQL is correct for current single-user, local-only load. This
+is NOT declared permanent anymore — when the app moves to a managed host
+(planned, but not Render), the DB decision gets revisited then, not before.
+Don't introduce SQLAlchemy, Flask-Migrate, or MySQL preemptively; that
+conversation happens at deployment time, not now.
 
 ====================================================
-WHAT IS ALREADY BUILT
+TASK / PROJECT MODEL
 ====================================================
 
-Authentication:
-- Google OAuth login with OWNER_EMAIL gate
-- UUID cookie + server-side session dict (multi-device support)
-- All routes protected
+Tasks: title, description, status, priority, due_date, project_id,
+parent_task_id (subtasks), tags/dependencies/notes.
 
-Database (SQLite):
-- tasks table with full psychological fields
-  (fear_level, ambiguity_level, energy_type, estimated_effort,
-   parent_task_id for subtasks, tags/dependencies/task_notes as JSON)
-- projects table (id, title, description, status, progress)
+Psychological fields (fear_level, ambiguity_level, energy_type,
+estimated_effort) still exist in the schema and still inform how the AI
+ranks/recommends tasks — but:
+- They are NEVER a required or default-visible form field. No user-facing
+  data entry UI for them by default.
+- The AI infers them automatically when it has enough signal, and must
+  attach a short reason when it does ("inferred high ambiguity because the
+  task has no clear next action") so the user can see and correct the
+  reasoning, not just the label.
+- An editable view of these fields exists, but collapsed by default —
+  opt-in only, never in the way.
 
-Web UI (Jinja2):
-- /dashboard — active tasks + projects
-- /tasks — filterable task list with subtree view
-- /tasks/<id> — full task detail, edit, dependency viewer
-- /projects and /projects/<id>
-- /chat — AI chat with streaming-style message append
-- /login
+Projects stay minimal on purpose: title, description, status, progress.
+Do NOT add goal/risk_level/target_date fields — the user explicitly wants
+projects to stay as loose "continuous efforts," not structured planning
+objects. This is a deliberate simplification, not an oversight.
 
-REST API (/api/*, bearer token auth):
-- GET/POST /api/tasks (filterable)
-- GET/DELETE /api/tasks/<id>
-- GET/POST /api/projects
-- GET/DELETE /api/projects/<id>
-- GET /api/health
-- GET /api/ai/recommendations
+Recurring tasks/habits: not modeled, not needed right now. Skip.
 
-AI Layer (/services/ai/):
-- Provider abstraction (provider.py) — interface any LLM implements
-- Gemini provider with full tool-calling support
-- Groq provider (exists, not active)
-- AIService with agentic loop (up to 5 tool-call rounds)
-- Tools: create_task, update_task, delete_task, create_project, delete_project
-- Budget guard: per-session token spend tracking, hard limit at
-  AI_SESSION_BUDGET env var, logs to costs.log
-- /chat/message and /chat/history (session-scoped, in-memory only)
-
-Infrastructure:
-- Rotating error log (errors.log)
-- Rotating cost log (costs.log)
+Multi-step task decomposition: the AI may break a large/vague task into
+subtasks, but only interactively, guided by the user turn-by-turn — never
+as a fully autonomous one-shot decomposition the user has to review after
+the fact. The user wants to stay in the loop while it happens, not approve
+a finished plan.
 
 ====================================================
-WHAT IS NOT YET BUILT (BUILD THESE)
+CAPTURE
 ====================================================
 
-These are the next major capabilities to implement, roughly in order:
+There is no single primary capture path — chat and a dedicated fast-capture
+bar are equally valid entry points into the same inbox, and both should
+stay first-class:
+- Fast-capture bar: sitewide, single text field, Enter saves immediately
+  with just a title, status='inbox'.
+- Chat: the user frequently just describes a task conversationally ("this
+  needs to get done, here are the constraints") and expects the AI to turn
+  that into a real task via create_task — this is a normal, expected path,
+  not a fallback.
 
-----------------------------------------------------
-1. RAG LAYER (HIGHEST PRIORITY)
-----------------------------------------------------
+Stretch goals (build the system to support these eventually, but they are
+NOT required for the current phase): auto-ingesting email into the inbox,
+voice capture, a phone widget. Don't block current work on these, but don't
+make architectural choices that would make them hard to add later either.
 
-The initial implementation of this layer is AI-generated. All design
-decisions below are final and locked. Once built and tested, the user
-will replace each component (chunker, embedder, vector store, retriever,
-injector) one at a time with their own implementation — the Ship of
-Theseus method. Write each component with a narrow, explicit interface
-so it can be swapped without touching anything else.
+====================================================
+KNOWLEDGE LAYER / RAG — INCLUDING THE CONNECTION ENGINE
+====================================================
 
-This is the foundation. Build this before anything else.
+The vault is meant to eventually hold everything about the user's life:
+class notes, journal entries, notes on people, project context, articles,
+school calendar/courses/already-taken classes, what they're currently
+learning, obligations — a full context dump, not a curated wiki. It is
+empty right now; this will fill in gradually.
 
-The vault is the user's entire knowledge base in markdown. The AI
-should retrieve relevant notes automatically on every query instead
-of relying on a bloated system prompt.
+Standard RAG pipeline (chunk → embed → store → retrieve → inject) is
+already built and should keep working as-is; don't break it.
 
-Vault structure:
+NEW AMBITION — build in parallel, starting now: a connection-engine layer
+on top of standard retrieval. Standard RAG answers "what's relevant to this
+query" via similarity. The user wants something more: a layer that surfaces
+non-obvious connections between notes/ideas and can actively challenge how
+they're thinking about something, not just retrieve matching text.
 
-/data/vault/
-  /classes/          — course notes, lecture summaries
-  /people/           — notes on people the user knows
-  /projects/         — project planning, club work
-  /journal/          — personal reflections, thinking
-  /goals/            — life goals, semester goals
-  /reference/        — articles, research, external material
-  /ai_generated/     — notes the AI created (reviewed: false until approved)
-  /meta/             — how the user thinks, self-model, preferences
+Constraints on how this gets built:
+- This is explicitly parallel development, not a replacement for the
+  existing retrieval pipeline. It must not break or destabilize anything
+  that currently works.
+- Design it with the same narrow-interface discipline as the rest of the
+  RAG stack (Ship of Theseus applies here too) — it should be swappable and
+  independently testable, not entangled with the retriever/injector.
+- It's fine for this to be a genuinely half-built, evolving thing for a
+  while. It should be started soon, but does not need to be complete before
+  other features ship.
+- Citations: whenever the AI answers using vault content (standard RAG or
+  the connection engine), show the source separately from the main answer
+  — a footnote/aside the user can check, not inline noise in the response
+  itself.
 
-Embedding + indexing:
-- Use Gemini text-embedding-004
-- ChromaDB as vector store, persisted to disk at /data/chroma/
-- Separate ChromaDB collections per folder (classes, people, projects, etc.)
-  so retrieval can be scoped by context type
-- Chunk notes by heading/paragraph, ~500 tokens per chunk
-- Store source path, folder, and frontmatter tags as chunk metadata
-- File watcher: any change to /data/vault/ triggers re-indexing of
-  that file automatically (use watchdog library)
-
-Retrieval modes:
-- PASSIVE: on every AI chat message, embed the query, retrieve top-k
-  relevant chunks across relevant collections, inject as context
-- ACTIVE: the AI has an explicit search_vault tool it can call with a
-  query and optional collection scope. The user can also ask directly:
-  "what do I know about X?"
-
-AI note generation:
-- The AI has a create_note tool that writes markdown to /data/vault/ai_generated/
-- Generated notes always include frontmatter:
-    ai_generated: true
-    reviewed: false
-    created_at: <timestamp>
-    topic: <topic>
-- Generated notes are indexed immediately after creation
-- CRITICAL: reviewed: false notes are visually flagged in the UI.
-  The AI should never treat unreviewed notes as ground truth.
-  Always surface uncertainty when citing ai_generated content.
-
-----------------------------------------------------
-2. CHAT HISTORY PERSISTENCE
-----------------------------------------------------
-
-Chat history currently lives in memory (CHAT_HISTORY list in app.py).
-It resets on every server restart. The AI has no memory between sessions.
-
-Fix: add chat_messages table to SQLite.
-
-Schema:
-  id            INTEGER PRIMARY KEY
-  session_id    TEXT (can be 'default' for single user)
-  role          TEXT ('user' or 'assistant')
-  content       TEXT
-  tool_calls    TEXT (JSON, nullable)
-  created_at    DATETIME
-
-On every /chat/message request:
-- Load last N messages from DB as conversation history
-- Pass to AI service
-- Save both user message and assistant response to DB
-
-This makes the AI actually remember prior conversations.
-
-----------------------------------------------------
-3. FAST CAPTURE INBOX
-----------------------------------------------------
-
-The system fails if adding a task takes more than 5 seconds.
-Right now it requires filling out a form. This must be fixed.
-
-Implement:
-- A persistent capture bar visible on every page (top of layout)
-- Single text input, keyboard shortcut to focus (e.g. Ctrl+Space)
-- Hit Enter: task is saved immediately with just the title
-- All other fields (fear_level, energy_type, etc.) default to null/unknown
-- Task lands in status='inbox' — a separate triage queue
-- /inbox view shows all inbox tasks for later enrichment
-- The AI can also triage inbox tasks: "process my inbox" should have
-  it suggest energy types, fear levels, and project assignments
-
-----------------------------------------------------
-4. CANVAS ICS IMPORT
-----------------------------------------------------
-
-The user's primary source of hard deadlines during the school year
-is Canvas LMS. Canvas exposes a personal ICS feed URL.
-
-Implement a normalization pipeline:
-
-External ICS URL (user pastes once, stored in .env or DB config)
-  ↓
-Fetcher (requests, scheduled — daily or on-demand)
-  ↓
-Parser (icalendar library)
-  ↓
-Raw event objects
-  ↓
-Normalizer → Internal task with:
-  - title from VEVENT SUMMARY
-  - due_date from VEVENT DTSTART/DTDUE
-  - source_type = 'canvas_ics'
-  - external_reference_id = VEVENT UID
-  - status = 'inbox' (never auto-set to active)
-  ↓
-Deduplication check (external_reference_id prevents duplicate imports)
-
-Add to DB:
-  external_sources table (id, source_type, name, ics_url, last_synced)
-  external_objects table (id, source_id, external_id, raw_payload_json, checksum)
-  normalization_links table (external_object_id → internal_task_id)
-
-API endpoints:
-  POST /imports/ics/connect  — save ICS URL
-  POST /imports/ics/sync     — trigger sync now
-  GET  /imports/status       — last sync time, item count
-
-----------------------------------------------------
-5. DEPLOYMENT
-----------------------------------------------------
-
-Deploy to Render.
-
-Requirements:
-- Flask + Gunicorn
-- SQLite database file must persist across deploys (use Render Disk)
-- ChromaDB must persist across deploys (same Render Disk)
-- /data/ directory on the disk holds both dev.db and chroma/
-- Environment variables via Render dashboard
-- Single dyno, no workers needed
-
-Do NOT introduce Docker unless Render requires it.
-Do NOT introduce Redis, Celery, or background workers initially.
-The file watcher for vault re-indexing runs in a background thread
-within the Flask process.
+AI note generation (create_note): the AI can write notes to
+/data/vault/ai_generated/, but only under an approval flow — frontmatter
+`ai_generated: true, reviewed: false` until the user reviews it. Never
+treat unreviewed AI-generated content as ground truth in later reasoning.
 
 ====================================================
 AI SYSTEM REQUIREMENTS
 ====================================================
 
-The AI is not a chatbot bolted onto a task manager.
-The AI is the primary interface for reasoning about your life.
+The AI is not a chatbot bolted onto a task manager. It's the primary
+interface for reasoning about the user's life — but its job is to unstick
+the user quickly, not to run their life for them.
 
 The AI should be able to:
-- Answer questions using retrieved vault context (RAG)
+- Answer questions using retrieved vault context (RAG + connection engine)
 - Read and mutate tasks (existing tools)
 - Search the vault explicitly (search_vault tool)
-- Create new notes when it identifies a knowledge gap (create_note tool)
+- Create new notes when it identifies a knowledge gap, pending approval
+  (create_note tool)
 - Summarize a set of notes or a project's context
-- Recommend what to work on right now, given energy level and time
-- Remember prior conversations (via persistent chat history)
+- Recommend what to work on right now, given energy level and time —
+  optimized for getting the user started in the next 30 seconds, not for
+  a comprehensive plan
+- Decompose a large task into subtasks interactively, with the user
+  steering each step
 
-Token efficiency is a hard constraint. The user has $10 in Gemini
-credit and wants it to last. Every AI call must:
-- Use RAG retrieval instead of full-context dumping
-- Inject only the top-k most relevant chunks (k=5 default, k=10 max)
-- Never send the full task list — send only tasks relevant to the query
-- Log token usage to costs.log on every call
+Proactive surfacing (e.g. "you haven't touched this in 2 weeks," "3 things
+due tomorrow") is explicitly OUT of the AI layer's scope for now. It
+belongs to deterministic logic in the execution layer if/when it gets
+built — not an LLM inference. This is deferred to a later phase; don't
+build it yet.
 
-The provider abstraction must remain. All AI logic lives in
-/services/ai/. Never put AI logic in Flask routes.
+Trust model: the AI must never take an action the user doesn't know about.
+Every mutation it makes should be visible and attributable in the UI or
+chat transcript. Write access to systems outside this app (e.g. real Google
+Calendar events, email) stays off until the user has enough track record
+with the system to extend it — this is a trust ramp, not a fixed policy.
+
+Passive self-modeling: the AI may build up a passive understanding of how
+the user thinks/works (akin to a `/meta` vault folder), and can use that to
+improve how it explains things back to the user — but it should never make
+decisions on the user's behalf based on this model without the user being
+aware a decision was made.
+
+Token efficiency is a real but secondary constraint. The user is open to
+spending more than the current $0.05/hour budget, and would rather pay for
+a more reliable model on turns that need it than fight a reliability
+ceiling with prompt engineering — figure out which is cheaper in practice.
+Log token usage to costs.log on every call regardless.
+
+The provider abstraction must remain. All AI logic lives in /services/ai/.
+Never put AI logic in Flask routes.
 
 Current tools the AI can call:
 - create_task(title, description, due_date, priority, fear_level,
@@ -307,147 +265,105 @@ Current tools the AI can call:
 - delete_task(id)
 - create_project(title, description, status)
 - delete_project(id)
-- search_vault(query, collection=None, k=5)  ← NEW, must be added
-- create_note(path, content, frontmatter)     ← NEW, must be added
+- read_document(path)
+- search_vault(query, collection=None, k=5)
+- create_note(path, content, frontmatter)
+- list_events(...) / create_event(...) / update_event(...) — local
+  calendars only; Google Calendar stays read-only end to end
 
 ====================================================
-DATABASE SCHEMA (CURRENT + ADDITIONS)
+CALENDAR
 ====================================================
 
-EXISTING (do not modify structure, only add to):
+Google Calendar: read-only, by design, for now. This is a trust-ramp
+decision, not permanent — revisit once the system has proven itself, not
+before.
 
-tasks:
-  id, title, description, status, priority, due_date, completed_at,
-  estimated_effort, complexity, energy_type, fear_level, ambiguity_level,
-  urgency_score, resistance_score, momentum_score, execution_mode,
-  context_type, project_id, parent_task_id, source_type,
-  external_reference_id, ai_generated, created_at, updated_at, archived,
-  tags (JSON), dependencies (JSON), task_notes (JSON)
+Canvas: an ICS calendar link integration already exists (events sync into
+the local calendar). A dedicated "Canvas deadlines → tasks" importer is
+NOT needed right now (it's summer) — don't build it until it's actually
+needed again.
 
-projects:
-  id, title, description, status, progress, created_at, updated_at
-
-ADD THESE TABLES:
-
-chat_messages:
-  id, session_id, role, content, tool_calls (JSON), created_at
-
-external_sources:
-  id, source_type, name, ics_url, last_synced, status, created_at
-
-external_objects:
-  id, source_id, external_id, object_type, raw_payload_json,
-  checksum, created_at, updated_at
-
-normalization_links:
-  id, external_object_id, internal_task_id, mapping_type
-
-====================================================
-VAULT FRONTMATTER STANDARD
-====================================================
-
-All notes should support this frontmatter schema:
-
----
-type: class_note | journal | person | project | goal | reference | ai_generated
-title: <human readable title>
-tags: []
-related_tasks: []         # list of task IDs
-related_project: null     # project name or null
-ai_generated: false       # true if AI wrote this
-reviewed: true            # false if ai_generated and not yet reviewed
-created_at: <ISO date>
-updated_at: <ISO date>
----
-
-The backend markdown parser must read frontmatter to populate
-ChromaDB chunk metadata, enabling filtered retrieval by type,
-tag, project, or review status.
+Other external sources: email is the one that actually matters going
+forward (auto-ingesting into inbox is a stretch goal, not required now).
+Discord is an acknowledged stretch goal, low priority. Keep scope narrow
+beyond these two.
 
 ====================================================
 FRONTEND REQUIREMENTS
 ====================================================
 
 Philosophy:
-- Calm, dark, information-dense
-- Keyboard-first (shortcuts for everything)
-- No productivity influencer aesthetics
-- No Notion-clone behavior
-- No animations that delay information
+- Information-dense, but every piece of information shown must be useful —
+  density for its own sake is not the goal.
+- Ease off the heavy dark-mode-only aesthetic from the original design;
+  still calm, still no productivity-influencer gloss, no gamification.
+- Keyboard-first for now; architect so voice input and a mobile
+  surface can be added later without a rewrite — but don't build them yet.
+- No animations that delay information.
 
-Views:
-1. Dashboard — "what do I do right now?" answered instantly
-   Shows: AI recommendation, urgent tasks, active projects,
-   inbox count, recent AI-generated notes awaiting review
-
-2. Tasks — filterable list, subtask tree, energy filter,
-   dependency viewer, inline status toggle
-
-3. Projects — goal, progress, risk, next actions, linked notes
-
-4. Inbox — ultra-fast capture + triage queue
-   The capture bar is always visible sitewide, not just on this page
-
-5. Chat — AI conversation with full RAG context
-   Shows source citations when AI uses vault content
-   Persists history across sessions
-
-6. Vault Browser (NEW) — browse /data/vault/ directory tree,
-   view note content, see which notes are ai_generated/unreviewed,
-   approve or edit AI-generated notes
-
-====================================================
-TASK PSYCHOLOGY (UNCHANGED)
-====================================================
-
-Tasks are psychologically-aware execution objects, not todos.
-
-Fields that matter:
-- fear_level (1-5): avoidance risk
-- ambiguity_level (1-5): clarity of next action
-- energy_type: deep_focus | light_admin | social | creative | low_energy
-- estimated_effort: time estimate
-- dependencies: list of blocking task IDs
-
-Recommendation logic (AI-driven, not formula-driven):
-The AI receives current energy level from the user and reasons over:
-- due date proximity
-- fear and ambiguity scores
-- dependency chain status
-- estimated effort vs available time
-- how long a task has been ignored
+Views (unchanged from what's already built, still the right set):
+1. Dashboard — gets the user moving in the first 30 seconds. Shows: AI
+   recommendation, urgent tasks, active projects, inbox count, recent
+   AI-generated notes awaiting review.
+2. Tasks — filterable list, subtask tree, inline status toggle. Psych
+   fields collapsed/hidden by default (see Task/Project Model above).
+3. Projects — minimal: description, status, progress, linked notes.
+4. Inbox — fast capture + triage queue; capture bar is sitewide, not
+   confined to this page.
+5. Chat — full RAG context, source citations shown separately from the
+   answer, persists history (low priority to improve further).
+6. Vault Browser — browse the vault tree, view notes, flag/approve
+   ai_generated + unreviewed content.
+7. Calendar — local + ICS + read-only Google Calendar merged view.
 
 ====================================================
 ENGINEERING PRINCIPLES
 ====================================================
 
-1. Token efficiency over convenience. Every prompt is money.
+1. Friction elimination beats feature depth. If a feature adds a step to
+   capturing or finding something, justify it hard before building it.
 2. RAG over context stuffing. Never dump full datasets into prompts.
-3. SQLite is permanent. Do not introduce ORM or MySQL.
+3. SQLite is fine for now; the DB decision is revisited at deployment time,
+   not before. Don't introduce an ORM or MySQL preemptively.
 4. AI logic never lives in routes. /services/ai/ owns all of it.
-5. Vault writes are append-safe. Never overwrite a user note.
-   AI writes only to /ai_generated/. User notes are read-only to the system.
+5. Vault writes are append-safe. Never overwrite a user note. AI writes
+   only to /ai_generated/, gated behind review. User notes are read-only
+   to the system.
 6. Unreviewed AI content is never treated as ground truth.
-7. The file watcher must be fault-tolerant. A crashed watcher
-   should not crash the Flask app.
-8. All secrets in .env. Nothing hardcoded.
-9. Clean component boundaries are non-negotiable. Each RAG component
-   (chunker, embedder, vector store, retriever, injector) must have a
-   narrow, explicit interface with no cross-component assumptions. This
-   is what makes the Ship of Theseus replacements possible.
+7. Every AI action is visible to the user. No silent mutations, anywhere.
+8. The file watcher must be fault-tolerant. A crashed watcher should not
+   crash the Flask app.
+9. All secrets in .env. Nothing hardcoded.
+10. Clean component boundaries are non-negotiable — RAG components
+    (chunker, embedder, vector store, retriever, injector, and now the
+    connection engine) must have narrow, explicit interfaces with no
+    cross-component assumptions. This is what makes Ship of Theseus
+    replacement possible, and what keeps the connection engine from
+    destabilizing standard retrieval while both evolve in parallel.
+11. Don't build for engagement. Never add a feature whose real purpose is
+    to make the user open the app more than they need to.
 
 ====================================================
 THE ONE SUCCESS CONDITION
 ====================================================
 
 The system works if and only if:
-- Adding a task takes under 5 seconds
-- Asking "what should I do right now?" gets a useful answer
-- Asking "what do I know about X?" retrieves real context from notes
-- The AI remembers what you talked about last session
-- The AI feels like it knows you
+- Adding a task takes under 5 seconds, from either chat or the capture bar
+- Opening the dashboard gets the user doing real work within 30 seconds —
+  after that, the app gets out of the way
+- Asking "what do I know about X?" retrieves real context from the vault,
+  including non-obvious connections, not just similarity matches
+- Every AI action is visible and explained, never a surprise
+- A year from now, the user is faster and sharper than when they started —
+  with or without the tool
 
-Everything else is secondary.
+It shouldn't just feel right. It should feel like there's no better way to
+run the user's life — while quietly making the user less dependent on it
+over time.
+
+Explicitly OUT OF SCOPE, permanently: multi-user support, monetization,
+anything designed to create dependency on the tool rather than reduce it.
 
 ====================================================
 OUTPUT REQUIREMENTS
@@ -457,9 +373,9 @@ When given a task in this system, act as a senior engineer who:
 - Knows the full existing codebase described above
 - Writes production-quality Python and Jinja2
 - Never introduces unnecessary dependencies
-- Optimizes for token efficiency in every AI call
-- Treats the RAG layer as load-bearing infrastructure
-- Respects the SQLite-only constraint absolutely
+- Treats friction reduction as the top priority, above feature completeness
+- Treats the RAG + connection-engine layer as load-bearing infrastructure,
+  but keeps them independently swappable
 - Never generates boilerplate — generates working, specific code
 
 For architecture tasks: produce concrete designs, not hand-waving.

@@ -1,0 +1,228 @@
+REQUIREMENTS REDRAFT — QUESTIONNAIRE
+Answer inline under each question (as much or little as you want). Skip anything
+that doesn't apply. Once done, we'll use this to rewrite STATUS.md and
+overall_prompt.txt from scratch.
+
+====================================================
+1. CORE PURPOSE
+====================================================
+
+1.1 What is this tool for, in one sentence, today — not the original pitch,
+    but what you actually want it to do for you right now?
+> I want to use this to reduce the friction I have in organizing my life and staying on task. 
+
+1.2 Who is it for? (Confirm: just you, forever? Or could it ever have a second
+    user — e.g. a partner, a future co-founder — even if not now?)
+> Probably just me forever. I want to build on a single-user philosophy right now even if I do one day add more. 
+
+1.3 What does your life/work look like right now that this needs to fit into?
+    (student? job? both? what are the "buckets" of obligation — school, work,
+    clubs, personal, etc.)
+> All of it. I have regrets from high school and I am going into college knowing I can do better. I'll need the tool to make sure I am keeping up with my relationships as well as staying on top of work, applying to AND doing well in internships, finding new stuff to do, and becoming someone that can have a real impact on the world.
+
+1.4 Of the original three layers (Knowledge/RAG, Execution/tasks,
+    Intelligence/AI chat) — are all three still what you want? Would you
+    drop, merge, or de-prioritize any of them?
+> No. I need the same overall things. I'd maybe depriorize executions/tasks solely because what I have now feels like too much. Ex. Fear level and all that bs feels like too much for me as a user to keep track of. 
+
+====================================================
+2. THE ACTUAL PROBLEM
+====================================================
+
+2.1 The original prompt listed these problems: obligations scattered across
+    Canvas/email/memory, fear-based procrastination on ambiguous tasks,
+    losing context switching between school/clubs/personal, no single place
+    that knows your life, AI that forgets between sessions, re-explaining
+    context every chat. Which of these are still real problems for you?
+    Which were never actually the problem?
+> I think the only one that was never actually a problem is the AI forgetting between sessions and having to re-explain stuff. I know what I need everytime I prompt and it is different stuff. I know what info is needed, so I can adjust. The other ones are still problems to an extent, the main one being that no single place knows my life. The rest aren't horribly deep. 
+
+2.2 What's the #1 thing that currently makes you NOT use a tool like this
+    (this one or any other you've tried)? Be honest — friction, trust,
+    habit, doesn't answer the right question, etc.
+> Usually friction. I'm not trying to learn how to use Notion and I don't want to write everything down as an MD file. Even then, those systems were built for a user-group that just doesn't describe me very well. 
+
+2.3 Describe the last time you actually needed this tool and it either
+    wasn't there or didn't help. What happened?
+> Well I am still building this tool out. I guess there were times in my life where this would have been useful. Those were just times where so much was going on and it would have been nice to have a system that I could look at that had everything in one place. I wouldn't have even needed an AI layer to tell me what to do, I probably could have taken one look and figured it out and I probably still can to this day. 
+
+====================================================
+3. DAILY WORKFLOW
+====================================================
+
+3.1 Walk through a realistic day: when would you open this app, for what,
+    and how many times?
+> Id probably use this app at least 10 times per day for quick tasks and as a way to organize the things that I am putting off. Ex. I could just open the chat app and say "this is something that needs to get done and here are the constraints"
+
+3.2 What's the very first thing you want to see when you open it?
+> The list of things that are on my list and just the very fact that the list isn't empty and shit needs to get done. I want to see the "how do I spend my first minute getting shit done"
+
+3.3 Is "what should I do right now?" still the core question the dashboard
+    should answer, or has that changed?
+> Only slightly. The way that I originally meant it was in an iterative way. Before I meant that I should be able to look at it, get whatever done, and then come back. Now, I mean in the way that I should be able to look at it, get started for 30 seconds, and then I shouldn't even need the app to tell me what to do because I'm locked in now. 
+
+3.4 How do tasks currently get into your head/life — school LMS, email,
+    verbal commitments, spontaneous ideas, recurring chores? Rank the
+    sources by volume.
+> I don't really have recurring chores. Other things are genuinely just put off till the last minute, unless I am working with someone else and they can hold me accountable. That is why I need this app so bad. Before, I'd maybe respond to an email or two during the day and get immediate things done, but I'd ignore anything long term. If stuff is usually only due at 11:59 PM, I'd only even check my Canvas LMS at 10:00 PM. 
+
+3.5 Fast capture: is "type a title, hit enter" still the right bar for
+    "fast enough," or is even that too much friction sometimes (e.g. would
+    you want voice, email-to-inbox, a phone widget)?
+> Fast capture should just be most efficient way to provide information to the system that could possibly exist. Ex. If an email comes in, it should get auto-read and then it should be rendered by the system and ideally, as I think about storing it, I'll see a confirmation that it has been stored. This is stretch feature that I can add eventaully, but I'd love the option for voice. Things like stuff on the Canvas calendar, should be automatically fed into the system because that is a pipeline that can be automated. Phone widget is what I want eventually, but it is a stretch goal. I want the system in place that can support a feature like that.
+
+====================================================
+4. TASK / EXECUTION MODEL
+====================================================
+
+4.1 The psychological fields (fear_level, ambiguity_level, energy_type,
+    estimated_effort) — do you actually fill these in, or do they sit
+    empty? Be honest about which ones you use and which are dead weight.
+> To be honest, they are all dead weight. I don't want to see any of them. I just want the option to see them and I want these to be considerations for my system of choosing what to do. In theory, I as a human can figure this out pretty easily and don't need a system to tell me which tasks are busy work. 
+
+4.2 Do you want the AI to infer/suggest these fields automatically instead
+    of you entering them by hand?
+> yeah, but I'm realizing that this feature specifically may not be as high of a priority. 
+
+4.3 Projects currently only have title/description/status/progress. Do you
+    want goal, risk_level, target_date added — or is that over-engineering
+    for how you actually think about projects?
+> No yeah. That is definetly over-engineering. I want to think of projects as continuous efforts that are just there in my mind. 
+
+4.4 How do you want recurring tasks/habits handled? (Not currently modeled
+    at all.)
+> Not needed for now. We can get to later. 
+
+4.5 Do you need multi-step task decomposition (AI breaks a big vague task
+    into subtasks automatically), or is that not something you'd trust/use?
+> It is something I would definetly use, but it isn't something I would trust. I think it would be fine if I guided the AI while it was making those tasks. I want these processes to be guided by me so I am still in control. 
+
+====================================================
+5. KNOWLEDGE / VAULT / RAG
+====================================================
+
+5.1 What do you actually want to put in the vault? Be concrete: class
+    notes, meeting notes, journal entries, articles you save, people notes,
+    something else?
+> All of those, but then also things that I know damn well that AI doesn't have good access to. IE: school calendar, courses offered at my school, classes I have already taken, what I am currently working on, what I am trying to learn, what I already know. 
+
+5.2 How much content exists right now — is the vault empty, or do you
+    already have notes elsewhere (Notion, Obsidian, Google Docs, physical
+    notebooks) that would need importing?
+> Empty right now, but I plan to start adding soon. It is going to be things like old papers, notes i have on people, info on clubs and stuff, things in my calendar and tasks list, obligations I have and more. Like I want to literally dump everything about me in there. 
+
+5.3 Do you actually want the AI writing notes into the vault on its own
+    (create_note), or does that feel like clutter/risk of hallucinated
+    "knowledge"?
+> I'd be fine with it so long as there is an approval process. I want to control what goes in. 
+
+5.4 How important is precise retrieval right now vs. later? i.e. is RAG
+    quality something you're actively trying to improve, or is it "good
+    enough" and you'd rather focus elsewhere for a while?
+> Yes I am trying to improve it. But I don't just want RAG tho. I want the ability for unique connections to be formed beyond just a similarity metric. I want something that can assist my thinking and actively challenge and enhance the way I think. 
+
+5.5 Do you want source citations shown when the AI answers from the vault
+    (so you can verify), or is that unnecessary overhead for a single-user
+    private tool?
+> Yes, absolutely yes. But it should be seperate from the output. It should only be there so I know where information is coming from. 
+
+====================================================
+6. AI ASSISTANT — ROLE & TRUST
+====================================================
+
+6.1 What should the AI never be allowed to do without confirmation? (e.g.
+    delete a task, create a calendar event, message someone on your
+    behalf if that's ever added)
+> It should never do anything without informing me. Anything that is done should be known to me. I trust it as I would an intern if I were a CEO one day. 
+
+6.2 The calendar-chat work turned up a real reliability ceiling
+    (gemini-2.5-flash-lite misreads correct context ~1-in-4 in stress
+    testing). Is that acceptable for daily use, or is it worth paying for
+    a stronger model on specific turn types (e.g. calendar)?
+> I think work can be done to ensure we don't need a stronger model.
+
+6.3 Current hourly AI budget is $0.05/hour (rolling window) — described as
+    "very tight." What's the actual dollar amount you're comfortable
+    spending per day/week/month once this is a daily-use tool?
+> All I know is that at a certain point, I can literally just self-host and it would be worth it. I'd be comfortable spending a little more, but the goal of the tool is to simultaneously reduce my dependancy on the tool, while making my life easier. I just want it to train me to think more efficiently and be faster. Within a year, I want to be able to do everything this system would do but in my head. 
+
+6.4 Do you want the AI proactive (it surfaces things unprompted — "you
+    haven't touched this task in 2 weeks," "you have 3 things due
+    tomorrow") or strictly reactive (only responds when asked)?
+> That should be a feature, but it shouldn't be part of the AI layer. It should be part of the core execution system itself.
+
+6.5 Should the AI remember things about you as a person (preferences,
+    patterns, how you think) the way the /meta vault folder implies, or
+    is that more than you want it inferring/storing?
+> Yes, I want that but it should be very passive. I want to use it to improve me as a human being, but not to make decisions on my behalf that I don't even know are being made. 
+
+====================================================
+7. CALENDAR & EXTERNAL INTEGRATIONS
+====================================================
+
+7.1 Google Calendar is read-only by design (explicit decision). Still the
+    right call, or do you now want the AI able to create/edit real Google
+    Calendar events (not just local ones)?
+> If I see the system working well, I'll extend access, but that would require time and an increase in trust that I don't yet have. 
+
+7.2 Canvas ICS import (deadlines → tasks) is still unbuilt. Still needed
+    this semester/term, or has your situation changed enough that this
+    isn't worth building?
+> It is the summer right now. I don't need it yet. Also, canvas gives calendars as a link. That part has been added. 
+
+7.3 Any other external sources worth integrating (email, a specific app,
+    a school portal, etc.), or should the scope stay narrow?
+> Email is really the main thing. Maybe discord as well, but that is an insane stretch goal. 
+
+====================================================
+8. UI / SURFACE AREA
+====================================================
+
+8.1 Which existing views do you actually use: dashboard, tasks, projects,
+    chat, calendar, vault browser? Which do you never open?
+> I don't use anything yet because the system isn't fully built and I don't have any real tasks to put in there. My main goal now is to build the tool and enjoy my summer. 
+
+8.2 "Calm, dark, information-dense, keyboard-first, no productivity
+    influencer aesthetics" was the original design philosophy. Still
+    true, or has your taste/need changed?
+> Maybe chill on the dark. Yes on the information dense, but everything needs to be useful. Keyboard first? Sure, but want to expand to voice  and phone eventually
+
+8.3 Mobile access — do you need this to work on your phone (native app,
+    responsive web, or "desktop only is fine")?
+> Eventually want to add to mobile. First need to lock in on the backend so that can eventually be done. 
+
+====================================================
+9. DEPLOYMENT, ACCESS, DATA
+====================================================
+
+9.1 Deployment to Render was the plan but never happened. Is going live
+    (accessible outside localhost) still a near-term goal, or is local-only
+    fine for now?
+> Local-only fine for now. Don't want Render tho when I do it. 
+
+9.2 Any concerns about where your data (tasks, journal entries, vault
+    content) physically lives — self-hosted only, or is a managed host
+    acceptable?
+> Managed host acceptable.
+
+9.3 SQLite + raw SQL was declared permanent. Any reason to revisit that,
+    or still correct for single-user load?
+> We can revist when I host. I want core architecture down first. 
+
+====================================================
+10. SUCCESS / SCOPE
+====================================================
+
+10.1 Original "one success condition" was: task-add under 5s, dashboard
+     answers "what now?", vault answers "what do I know about X?", AI
+     remembers across sessions, AI "feels like it knows you." Does that
+     still capture it, or would you rewrite it?
+> Yeah sounds about right. It shouldn't just feel right tho. It should feel like there is no better way to do my stuff. 
+
+10.2 What's the smallest version of this that you'd actually use daily,
+     starting tomorrow, if we stripped everything down?
+> Task scheduler ig. This is everything you want to do. You were aiming for 3 days. Lets get it done in 3 hours. 
+
+10.3 What's explicitly OUT of scope — things you don't want this to
+     become, even if they'd be technically interesting to build?
+> Multi-user or monetized. I also don't want this to be a dependancy. The goal is to build this in such a way that it makes life easier, but I could go back to doing things themselves after using it. I should be smarter after a year of using this and faster even I ditch the system.  

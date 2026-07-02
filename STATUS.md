@@ -1,11 +1,26 @@
 # Personal Execution OS — Status Report
-_Last updated: 2026-07-01_
+_Last updated: 2026-07-02_
 
 ---
 
 ## What This Is
 
-A single-user cognitive infrastructure system. The goal is one thing: the dashboard should instantly answer "what should I do right now?" Tasks are psychologically-aware objects with fear, ambiguity, energy type, and dependency fields. An AI assistant (Gemini) can read and mutate the task list, local calendar, and vault through a chat interface. This is a private tool, not a SaaS product.
+A single-user cognitive infrastructure system whose actual design goal is
+to eliminate friction now while making the user need it less over time —
+success is not "opens this every day forever," it's "gets moving in the
+first 30 seconds, and is faster/sharper a year from now with or without
+the tool." The dashboard's job is to unstick the user, not micromanage
+them through the whole task. Tasks carry psychological fields (fear,
+ambiguity, energy type, effort) but these are AI-inferred in the
+background, not user-facing form fields, and the AI must show its
+reasoning when it infers them. An AI assistant (Gemini) can read and
+mutate the task list, local calendar, and vault through a chat interface
+— every action it takes must be visible to the user, nothing silent. This
+is a private tool, not a SaaS product, and it's built for exactly one user
+indefinitely — no multi-tenancy, no monetization.
+
+**Full requirements/rationale**: see `overall_prompt.txt` (redrafted
+2026-07-02 from `requirements_questionnaire.txt`).
 
 **Who's building this:** one person, solo, no team.
 
@@ -160,26 +175,38 @@ This was the source of a long debugging session and is worth documenting in deta
 ### Definitely Still Needed
 
 **1. Inbox / fast-capture interface**
-An ultra-low-friction capture screen — type a task title, hit enter, done. Right now you have to fill out a form on `/tasks`. The capture friction is real and breaks the "adding a task takes seconds" requirement.
+An ultra-low-friction capture screen — type a task title, hit enter, done. Right now you have to fill out a form on `/tasks`. Chat already works as a capture path (describe a task conversationally, AI calls `create_task`), but the dedicated sitewide capture bar doesn't exist yet — both are meant to be equally first-class entry points into the same inbox, not one primary/one fallback.
 
-**2. Deployment**
-The app only runs locally. No Render config, no Gunicorn setup, no production environment. This is the main blocker to making the app a daily-use tool.
+**2. Hide psych fields from the UI, keep AI inference**
+`fear_level`, `ambiguity_level`, `energy_type`, `estimated_effort` are currently exposed as editable form fields on `/tasks/<id>`. That's now explicitly the wrong UI — these should never be default-visible data entry. Needed: (a) collapse them behind an opt-in/expand control, off by default, (b) have the AI infer them automatically when ranking/recommending tasks, (c) surface the AI's reasoning for each inference (not just the label) so the user can see and correct it.
 
-**3. Missing project fields**
-The DB schema for `projects` is minimal. The roadmap specifies `goal`, `risk_level`, and `target_date` — none of these are in the DB or UI.
+**3. Connection-engine layer on top of RAG**
+Standard retrieval (chunk → embed → store → retrieve → inject) is built and should keep working untouched. New, explicitly parallel effort: a layer that surfaces non-obvious connections between vault notes and can actively challenge how the user is thinking about something — not just similarity-ranked retrieval. Should be started soon per the redraft, built with the same narrow-interface discipline as the rest of the RAG stack so it doesn't destabilize existing retrieval while both evolve.
 
-**4. Canvas ICS import for deadlines**
-Calendar now supports arbitrary ICS sync (any calendar with an ICS URL, including Canvas if it exposes one), but there's no dedicated "import my Canvas deadlines as tasks" flow — ICS sync only creates calendar events, not tasks.
+**4. Source citations shown separately from AI answers**
+When the AI answers using vault content (RAG or the future connection engine), the source should be visible as a separate footnote/aside — not inline in the answer text. Not yet implemented in the chat UI.
+
+### Deferred — Not Needed Right Now
+
+**Deployment.** Local-only is fine for now; going live isn't currently blocking daily use. When it happens: no Render, a managed host is acceptable, and the SQLite-vs-something-else decision gets revisited at that point, not before.
+
+**Canvas ICS-to-task importer.** It's summer; Canvas deadlines aren't the pressure point right now. The ICS calendar link sync (events only, not tasks) already exists and is enough for the moment.
+
+**Proactive nudges** (e.g. "you haven't touched this in 2 weeks," "3 things due tomorrow"). Explicitly out of the AI layer's scope — if built, this is deterministic logic in the execution layer, not an LLM inference. Deferred to a later phase entirely; not being built yet.
+
+**Recurring tasks/habits.** Not modeled, not needed yet.
+
+**Voice capture, email auto-ingest into inbox, phone widget.** Stretch goals. Don't build now, but don't make architectural choices that would make them hard to add later.
 
 ### Needs a Decision Before Building
 
-**5. MySQL + SQLAlchemy migration**
-The roadmap specifies MySQL + SQLAlchemy + Flask-Migrate. The current SQLite + raw SQL setup works fine for a single user with no concurrent writes. SQLite can handle this app's load indefinitely. This decision has downstream effects on deployment complexity.
-
-**6. Calendar model reliability ceiling**
-`gemini-2.5-flash-lite` occasionally misreads correct calendar context (see AI Layer section above). Worth deciding whether to upgrade the model for calendar-specific turns, add a deterministic answer-verification pass, or accept it as-is.
+**Calendar model reliability ceiling — decision made, engineering still needed.** `gemini-2.5-flash-lite` occasionally misreads correct calendar context (see AI Layer section above). Decision: stick with the current model and invest in engineering (better deterministic pre-processing, verification passes) rather than upgrading to a pricier model — revisit only if that effort provably can't close the gap.
 
 ### Dropped or Already Solved Differently
+
+**MySQL + SQLAlchemy migration** — Not being built. SQLite + raw SQL is correct for current single-user, local-only load; this gets revisited at deployment time if it ever needs to, not preemptively.
+
+**Extra project fields (`goal`, `risk_level`, `target_date`)** — Explicitly decided against. Projects stay minimal (title, description, status, progress) — the user wants to think of them as loose "continuous efforts," not structured planning objects.
 
 **Separate recommendation API endpoints** — `/api/ai/recommendations` already handles this via Gemini. Chat can answer the same questions.
 
@@ -189,20 +216,19 @@ The roadmap specifies MySQL + SQLAlchemy + Flask-Migrate. The current SQLite + r
 
 **Separate `tags`, `task_tags`, `task_dependencies`, `task_notes` tables** — Solved with JSON columns.
 
-**In-memory chat history** — Solved. Chat is now persisted to `chat_messages` table.
+**In-memory chat history** — Solved. Chat is now persisted to `chat_messages` table. (Note: this was confirmed to never have been a real problem for the user — kept because it's already built and cheap to maintain, not because it's a priority to invest further in.)
 
 **Obsidian integration** — Decided against. Custom vault at `/data/vault/` replaces this.
 
-**External calendar imports (Google Calendar)** — Solved, read-only. Google Calendar events are live-fetched/cached and surfaced both on the `/calendar` page and in AI chat, but this app will never write to Google Calendar — that was an explicit decision (read-only, local calendar is the only writable one).
+**External calendar imports (Google Calendar)** — Solved, read-only. Google Calendar events are live-fetched/cached and surfaced both on the `/calendar` page and in AI chat. Write access stays off as a deliberate trust-ramp decision (see Open Questions) — not a permanent architectural limit.
 
 ---
 
 ## Open Questions (Unresolved)
 
-1. **SQLite or MySQL?** Single-user load makes SQLite fine forever. MySQL only makes sense if Render requires it or you want proper migrations tooling.
-2. **Project fields**: Is `goal`, `risk_level`, `target_date` worth adding to the project schema, or is the current minimal schema enough?
-3. **Hourly AI budget**: $0.05/hour (rolling window) is very tight. What should the real limit be once this is in daily use?
-4. **Calendar model reliability**: is occasional (~1-in-4 in stress testing) misreading of correct calendar context by `gemini-2.5-flash-lite` acceptable for daily use, or does it need a stronger model / verification layer before this is trustworthy day-to-day?
-5. **Canvas deadlines as tasks**: worth building a dedicated ICS-to-task importer, or is manual entry fine now that ICS calendar sync exists?
+1. **AI budget**: no hard number yet. User is open to spending more than the current $0.05/hour (rolling window) and would consider self-hosting if cost becomes the bottleneck — the AI spend is instrumental to reducing long-run dependency on the tool, not something to minimize for its own sake. Needs a concrete number once daily-use patterns are clearer.
+2. **Connection-engine architecture**: how does it plug into the existing retrieve/inject pipeline without coupling to it? What's the interface boundary (separate service? separate ChromaDB collection? a graph layer alongside the vector store?) — undecided, needs a design pass before real implementation starts.
+3. **Psych-field reasoning surfacing**: what does "AI shows its reasoning for an inferred field" actually look like in the UI — inline tooltip, expandable note, chat-style explanation? Not yet designed.
+4. **Trust-ramp criteria**: what specifically has to be true before Google Calendar (or any other external system) moves from read-only to write-enabled? Not yet defined — currently just "prove reliability first," no concrete bar.
 
 ---

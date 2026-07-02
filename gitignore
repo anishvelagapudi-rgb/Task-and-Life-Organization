@@ -51,3 +51,6 @@ $RECYCLE.BIN/
 # personal vault content & vector store
 data/vault/
 data/chroma/
+
+# claude
+CLAUDE.md
