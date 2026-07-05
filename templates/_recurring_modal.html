@@ -1,0 +1,102 @@
+<!-- Recurring tasks modal — Daily/Weekly tabs, included from dashboard.html and tasks.html.
+     Recurring tasks are excluded from the normal task lists on both pages; this modal
+     is their only home in the UI. Data comes from GET /tasks/recurring; checking a box
+     reuses the existing /tasks/<id>/complete toggle endpoint. -->
+
+<button type="button" id="recurring-modal-btn" class="btn-ghost btn-sm">↻ Recurring</button>
+
+<div id="recurring-modal-backdrop" class="modal-backdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <div style="display:flex; gap:6px;">
+        <button type="button" id="rm-tab-daily" class="btn-sm btn-active">Daily</button>
+        <button type="button" id="rm-tab-weekly" class="btn-ghost btn-sm">Weekly</button>
+      </div>
+      <button type="button" id="rm-close" class="btn-ghost btn-sm">✕</button>
+    </div>
+    <div class="modal-body" id="rm-body">
+      <p class="empty">Loading…</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const btn      = document.getElementById('recurring-modal-btn');
+  const backdrop = document.getElementById('recurring-modal-backdrop');
+  const body     = document.getElementById('rm-body');
+  const tabDaily = document.getElementById('rm-tab-daily');
+  const tabWeekly = document.getElementById('rm-tab-weekly');
+  if (!btn) return;
+
+  let data = { daily: [], weekly: [] };
+  let activeTab = 'daily';
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function render() {
+    const items = data[activeTab] || [];
+    if (items.length === 0) {
+      body.innerHTML = `<p class="empty">No ${activeTab} recurring tasks.</p>`;
+      return;
+    }
+    body.innerHTML = items.map(t => `
+      <div class="card recurring-item" style="display:flex; align-items:center; gap:10px; padding:10px 14px;">
+        <input type="checkbox" class="rm-check" data-id="${t.id}" ${t.status === 'done' ? 'checked' : ''}>
+        <span style="flex:1; ${t.status === 'done' ? 'color:var(--muted); text-decoration:line-through;' : ''}">${escHtml(t.title)}</span>
+        ${t.project_title ? `<span class="badge">${escHtml(t.project_title)}</span>` : ''}
+      </div>
+    `).join('');
+  }
+
+  function switchTab(tab) {
+    activeTab = tab;
+    tabDaily.className  = tab === 'daily'  ? 'btn-sm btn-active' : 'btn-ghost btn-sm';
+    tabWeekly.className = tab === 'weekly' ? 'btn-sm btn-active' : 'btn-ghost btn-sm';
+    render();
+  }
+
+  function load() {
+    body.innerHTML = '<p class="empty">Loading…</p>';
+    fetch('/tasks/recurring')
+      .then(r => r.json())
+      .then(json => { data = json; render(); })
+      .catch(() => { body.innerHTML = '<p class="empty">Failed to load recurring tasks.</p>'; });
+  }
+
+  function open() {
+    backdrop.style.display = 'flex';
+    load();
+  }
+
+  function close() {
+    backdrop.style.display = 'none';
+  }
+
+  btn.addEventListener('click', open);
+  document.getElementById('rm-close').addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  tabDaily.addEventListener('click', () => switchTab('daily'));
+  tabWeekly.addEventListener('click', () => switchTab('weekly'));
+
+  body.addEventListener('change', (e) => {
+    const check = e.target.closest('.rm-check');
+    if (!check) return;
+    const id = check.dataset.id;
+    check.disabled = true;
+    fetch(`/tasks/${id}/complete`, { method: 'POST', headers: { 'X-Requested-With': 'fetch' } })
+      .then(r => r.json())
+      .then(({ status }) => {
+        for (const tab of ['daily', 'weekly']) {
+          const t = data[tab].find(x => x.id === id);
+          if (t) t.status = status;
+        }
+        check.disabled = false;
+        render();
+      })
+      .catch(() => { check.disabled = false; check.checked = !check.checked; });
+  });
+})();
+</script>

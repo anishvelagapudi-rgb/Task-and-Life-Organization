@@ -151,11 +151,18 @@ class GeminiProvider(AIProvider):
         Pull token counts out of the API response and hand them to the budget tracker.
         response.usage_metadata is populated by Gemini on every generate_content call —
         it reflects the actual tokens processed, not an estimate.
+
+        prompt_token_count/candidates_token_count alone undercount the call: Gemini also
+        bills tool_use_prompt_token_count (function-declaration overhead, part of input)
+        and thoughts_token_count (internal reasoning tokens, billed as output) separately,
+        so both are folded in here.
         """
         usage = response.usage_metadata
+        input_tokens = (usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0)
+        output_tokens = (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)
         budget.record_usage(
-            input_tokens=usage.prompt_token_count or 0,
-            output_tokens=usage.candidates_token_count or 0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             model=self.model,
         )
 

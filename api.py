@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from db import get_db
+from db import get_db, enforce_recurring_invariant
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -27,8 +27,8 @@ def require_api_key():
 # Prevents callers from accidentally overwriting id, created_at, etc.
 TASK_FIELDS = {
     "title", "description", "status", "priority", "due_date", "completed_at",
-    "estimated_effort", "energy_type", "fear_level", "ambiguity_level",
-    "project_id", "parent_task_id", "source_type", "ai_generated",
+    "estimated_effort", "energy_type", "fear_level", "ambiguity_level", "psych_reasoning",
+    "project_id", "parent_task_id", "source_type", "ai_generated", "recurring",
 }
 
 PROJECT_FIELDS = {"title", "description", "status", "progress"}
@@ -100,7 +100,8 @@ def upsert_task():
     if task_id:
         # ── UPDATE ──────────────────────────────────────────────────────────
         # id was provided → partial update. Only touch the fields the caller sent.
-        if db.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+        existing_row = db.execute("SELECT recurring FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if existing_row is None:
             return jsonify({"error": "Not found"}), 404
 
         # Filter out anything not in TASK_FIELDS (ignores id, created_at, junk keys).
@@ -108,6 +109,7 @@ def upsert_task():
         if not updates:
             return jsonify({"error": "No valid fields to update"}), 400
 
+        enforce_recurring_invariant(updates, existing_row["recurring"])
         updates["updated_at"] = ts
 
         # Build "col1 = ?, col2 = ?" dynamically from whatever fields were sent.
@@ -128,6 +130,7 @@ def upsert_task():
         fields.setdefault("status", "inbox")
         fields.setdefault("priority", "medium")
         fields.setdefault("source_type", "external")
+        enforce_recurring_invariant(fields)
         new_id = str(uuid.uuid4())
         fields["id"] = new_id
         fields["created_at"] = ts

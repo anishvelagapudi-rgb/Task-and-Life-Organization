@@ -8,4 +8,16 @@
 <div class="card" style="padding:0;">
   <pre style="padding:20px;font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;margin:0;color:var(--text);">{{ content }}</pre>
 </div>
+
+{% if connections %}
+<div class="section" style="margin-top:20px;">
+  <h2>Related (non-obvious)</h2>
+  {% for c in connections %}
+  <div class="card" style="padding:10px 16px;">
+    <a href="/vault/file/{{ c.target_path }}" style="font-family:monospace; font-size:12px;">{{ c.target_path }}</a>
+    <div style="font-size:12px; color:var(--muted); margin-top:4px;">{{ c.summary }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 {% endblock %}

@@ -60,7 +60,7 @@ def chat():
         return jsonify({"error": "messages array is required"}), 400
 
     try:
-        reply = _get_service().chat(get_db(), messages)
+        reply, sources = _get_service().chat(get_db(), messages)
     except httpx.NetworkError:
         return jsonify({"error": "AI service unreachable"}), 503
-    return jsonify({"reply": reply})
+    return jsonify({"reply": reply, "sources": sources})

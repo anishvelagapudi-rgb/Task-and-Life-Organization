@@ -8,9 +8,10 @@
     <span id="task-count" style="font-size:13px; font-weight:400; color:var(--muted); margin-left:8px;"></span>
   </h1>
   <!-- tab toggle: List vs Tree -->
-  <div style="display:flex; gap:6px;">
+  <div style="display:flex; gap:6px; align-items:center;">
     <button id="tab-list" class="btn-sm btn-active" onclick="switchTab('list')">List</button>
     <button id="tab-tree" class="btn-ghost btn-sm" onclick="switchTab('tree')">Tree</button>
+    {% include "_recurring_modal.html" %}
   </div>
 </div>
 
@@ -73,13 +74,14 @@
         <th>Priority</th>
         <th>Due</th>
         <th>Energy</th>
+        <th>Project</th>
         <th class="adv-col">Fear</th>
         <th class="adv-col">Ambiguity</th>
         <th class="adv-col">Effort (min)</th>
-        <th class="adv-col">Project</th>
         <th class="adv-col">Tags</th>
         <th class="adv-col">ID</th>
         <th class="complete-col"></th>
+        <th class="delete-col"></th>
       </tr>
     </thead>
     <tbody>
@@ -99,21 +101,26 @@
         <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
         <td>{{ task.due_date or '—' }}</td>
         <td>{{ task.energy_type or '—' }}</td>
+        <td>{{ task.project_title or '—' }}</td>
         <td class="adv-col">{{ task.fear_level or '—' }}</td>
         <td class="adv-col">{{ task.ambiguity_level or '—' }}</td>
         <td class="adv-col">{{ task.estimated_effort or '—' }}</td>
-        <td class="adv-col">{{ task.project_title or '—' }}</td>
         <td class="adv-col">{{ task.tags | join(', ') if task.tags else '—' }}</td>
         <td class="adv-col"><span style="font-family:monospace;font-size:11px;color:var(--muted)">{{ task.id | string | truncate(8, True, '') }}</span></td>
         <td class="complete-col">
-          <button onclick="toggleComplete(this, {{ task.id | tojson }})" title="Toggle complete">
+          <button class="js-toggle-complete" data-id="{{ task.id }}" title="Toggle complete">
             {{ '↩' if task.status == 'done' else '✓' }}
+          </button>
+        </td>
+        <td class="delete-col">
+          <button class="js-delete-task" data-id="{{ task.id }}" title="Delete task">
+            🗑
           </button>
         </td>
       </tr>
       {% endfor %}
       <tr data-system="true" id="empty-row" style="display:none;">
-        <td colspan="10" class="empty" style="padding:24px 12px;">No tasks match the current filters.</td>
+        <td colspan="12" class="empty" style="padding:24px 12px;">No tasks match the current filters.</td>
       </tr>
     </tbody>
   </table>
@@ -163,17 +170,6 @@
           </select>
         </div>
         <div class="field">
-          <label>Energy Type</label>
-          <select name="energy_type">
-            <option value="">—</option>
-            <option value="deep_focus">Deep Focus</option>
-            <option value="light_admin">Light Admin</option>
-            <option value="creative">Creative</option>
-            <option value="social">Social</option>
-            <option value="low_energy">Low Energy</option>
-          </select>
-        </div>
-        <div class="field">
           <label>Project</label>
           <select name="project_id">
             <option value="">—</option>
@@ -182,25 +178,52 @@
             {% endfor %}
           </select>
         </div>
-      </div>
-      <div class="row">
         <div class="field">
           <label>Due Date</label>
-          <input type="date" name="due_date">
+          <input type="date" name="due_date" id="new-task-due-date">
         </div>
         <div class="field">
-          <label>Effort (min)</label>
-          <input type="number" name="estimated_effort" min="1">
-        </div>
-        <div class="field">
-          <label>Fear (1–10)</label>
-          <input type="number" name="fear_level" min="1" max="10">
-        </div>
-        <div class="field">
-          <label>Ambiguity (1–10)</label>
-          <input type="number" name="ambiguity_level" min="1" max="10">
+          <label>Recurring</label>
+          <select name="recurring" id="new-task-recurring">
+            <option value="">— none —</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
         </div>
       </div>
+
+      <!-- psychological fields — AI-inferred, hidden by default; see task_detail.html for the same pattern -->
+      <details style="margin: 4px 0 8px;">
+        <summary style="cursor:pointer; font-size:12px; color:var(--muted); user-select:none;">
+          Psychological fields (AI-inferred) — click to view or edit
+        </summary>
+        <div class="row" style="margin-top:12px;">
+          <div class="field">
+            <label>Energy Type</label>
+            <select name="energy_type">
+              <option value="">—</option>
+              <option value="deep_focus">Deep Focus</option>
+              <option value="light_admin">Light Admin</option>
+              <option value="creative">Creative</option>
+              <option value="social">Social</option>
+              <option value="low_energy">Low Energy</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Effort (min)</label>
+            <input type="number" name="estimated_effort" min="1">
+          </div>
+          <div class="field">
+            <label>Fear (1–5)</label>
+            <input type="number" name="fear_level" min="1" max="5">
+          </div>
+          <div class="field">
+            <label>Ambiguity (1–5)</label>
+            <input type="number" name="ambiguity_level" min="1" max="5">
+          </div>
+        </div>
+      </details>
+
       <div>
         <button type="submit">Create Task</button>
       </div>
@@ -303,6 +326,18 @@
   apply();
 })();
 
+// ── recurring tasks must not have a due date — disable/clear it in the new-task form ──
+(function () {
+  const recurringSelect = document.getElementById('new-task-recurring');
+  const dueDateInput = document.getElementById('new-task-due-date');
+  if (!recurringSelect || !dueDateInput) return;
+  recurringSelect.addEventListener('change', () => {
+    const isRecurring = recurringSelect.value !== '';
+    dueDateInput.disabled = isRecurring;
+    if (isRecurring) dueDateInput.value = '';
+  });
+})();
+
 // ── complete task (list view) ────────────────────────────────────────────────
 
 // toggles a task between done and inbox without a page reload.
@@ -322,6 +357,39 @@ function toggleComplete(btn, taskId) {
     btn.textContent   = data.status === 'done' ? '↩' : '✓';  // flip the button symbol
   });
 }
+
+// ── delete task (list view) ──────────────────────────────────────────────────
+
+function deleteTask(btn, taskId) {
+  if (!confirm('Delete this task? This cannot be undone.')) return;
+  fetch(`/tasks/${taskId}/delete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(() => {
+    const tbody = btn.closest('tbody');
+    btn.closest('tr').remove();
+
+    const countEl = document.getElementById('task-count');
+    const remaining = tbody.querySelectorAll('tr:not([data-system])').length;
+    if (countEl) countEl.textContent = `${remaining} task${remaining !== 1 ? 's' : ''}`;
+
+    const emptyRow = document.getElementById('empty-row');
+    if (remaining === 0 && emptyRow) emptyRow.style.display = '';
+  });
+}
+
+// task IDs are UUID strings, which broke when interpolated straight into an
+// onclick="..." attribute (the JSON-quoted id closes the attribute's own
+// quotes early and mangles the tag). Delegated data-id listeners avoid that
+// whole class of bug.
+document.getElementById('task-table')?.addEventListener('click', e => {
+  const completeBtn = e.target.closest('.js-toggle-complete');
+  if (completeBtn) return toggleComplete(completeBtn, completeBtn.dataset.id);
+
+  const deleteBtn = e.target.closest('.js-delete-task');
+  if (deleteBtn) return deleteTask(deleteBtn, deleteBtn.dataset.id);
+});
 </script>
 
 <script>

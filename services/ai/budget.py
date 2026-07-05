@@ -3,18 +3,27 @@ Hourly rolling budget guard for AI API calls.
 
 HOW IT WORKS:
   Every call to the Gemini API returns a `usage_metadata` object in the response.
-  That object contains the actual token counts for that call:
-    - prompt_token_count     → tokens we sent (system prompt + task context + user message)
-    - candidates_token_count → tokens the model generated back
+  That object contains the actual token counts for that call, split across the
+  input -> process -> output pipeline:
+    - prompt_token_count          → input tokens (system prompt + task context + user message)
+    - tool_use_prompt_token_count → input-side overhead for function-calling tool declarations
+    - thoughts_token_count        → "process" tokens spent on internal reasoning, billed as output
+    - candidates_token_count      → output tokens the model generated back
 
-  gemini_provider.py reads those counts from the response and passes them here
-  via record_usage(). We multiply by the per-token dollar rates to get the cost
-  of that call, append it with a timestamp to a rolling deque, and raise
-  BudgetExceededError if the sum of costs in the last 60 minutes exceeds the limit.
+  gemini_provider.py sums prompt_token_count + tool_use_prompt_token_count into
+  input_tokens, and candidates_token_count + thoughts_token_count into output_tokens,
+  then passes both here via record_usage(). We multiply by the per-token dollar rates
+  to get the cost of that call, append it with a timestamp to a rolling deque, and
+  raise BudgetExceededError if the sum of costs in the last 60 minutes exceeds the limit.
 
   Once the rolling window slides past old entries, the budget automatically recovers —
   no server restart needed. The limit applies to all API calls combined (generative
   AND embedding).
+
+  The rolling window itself lives only in this in-memory deque — nothing is persisted
+  to disk (costs.log is a write-only audit trail, never read back on startup). So a
+  server restart always clears accumulated spend, by construction, not as a feature
+  that could silently regress.
 
 PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
   Gemini 2.5 Flash Lite — Input:  $0.10 / 1M tokens  ← unconfirmed
@@ -22,7 +31,7 @@ PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
   gemini-embedding-001  — Input:  $0.025 / 1M tokens  ← unconfirmed (estimated from text-embedding-004)
   Embedding responses carry no usage_metadata, so token count is estimated at 1 token per 4 chars.
 
-HOURLY_LIMIT defaults to $0.05 but can be overridden via AI_HOURLY_BUDGET in .env.
+HOURLY_LIMIT defaults to $0.15 but can be overridden via AI_HOURLY_BUDGET in .env.
 """
 
 import logging
@@ -33,7 +42,7 @@ from logging.handlers import RotatingFileHandler
 
 _WINDOW_SECONDS = 3600  # 1 hour rolling window
 
-HOURLY_LIMIT: float = float(os.environ.get("AI_HOURLY_BUDGET", "0.05"))
+HOURLY_LIMIT: float = float(os.environ.get("AI_HOURLY_BUDGET", "0.15"))
 
 _INPUT_RATE  = 0.10  / 1_000_000
 _OUTPUT_RATE = 0.40  / 1_000_000

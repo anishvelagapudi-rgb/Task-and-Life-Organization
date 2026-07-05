@@ -46,6 +46,8 @@ class StoredChunk:
     collection: str
     heading: str
     distance: float
+    ai_generated: bool = False
+    reviewed: bool = True
 
 
 def upsert_chunks(collection_name: str, chunks, embeddings: list[list[float]]) -> None:
@@ -60,6 +62,8 @@ def upsert_chunks(collection_name: str, chunks, embeddings: list[list[float]]) -
             {
                 "source_path": c.source_path,
                 "heading": c.heading,
+                "ai_generated": c.ai_generated,
+                "reviewed": c.reviewed,
             }
             for c in chunks
         ],
@@ -87,20 +91,30 @@ def query_collection(
             n_results=min(k, n),
             include=["documents", "metadatas", "distances"],
         )
-        return [
-            StoredChunk(
+        chunks = []
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            meta = meta or {}
+            source_path = meta.get("source_path")
+            if source_path is None:
+                logger.warning(
+                    "Skipping chunk with missing/None metadata in collection %s",
+                    collection_name,
+                )
+                continue
+            chunks.append(StoredChunk(
                 text=doc,
-                source_path=meta["source_path"],
+                source_path=source_path,
                 collection=collection_name,
                 heading=meta.get("heading", ""),
                 distance=dist,
-            )
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            )
-        ]
+                ai_generated=bool(meta.get("ai_generated", False)),
+                reviewed=bool(meta.get("reviewed", True)),
+            ))
+        return chunks
     except Exception:
         logger.exception("Query failed for collection %s", collection_name)
         return []

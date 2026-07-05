@@ -66,7 +66,58 @@ def store_events(db, calendar_id, ics_bytes):
     return count
 
 
+def store_tasks(db, calendar_id, ics_bytes):
+    """Like store_events, but each VEVENT becomes a task (due_date = event date)
+    instead of a calendar event — for feeds whose items are really deadlines
+    (e.g. Canvas assignment exports), not time-blocked events. Matches existing
+    tasks by (source_calendar_id, source_uid) for idempotent re-sync, and only
+    ever touches title/description/due_date on update — never status,
+    completed_at, or priority, since those are the user's own task-management
+    state, not something the upstream feed owns."""
+    from classes.Task import Task
+
+    cal = ICalendar.from_ical(ics_bytes)
+    count = 0
+    for comp in cal.walk():
+        if comp.name != "VEVENT":
+            continue
+        uid = str(comp.get("UID", ""))
+        title = str(comp.get("SUMMARY", "Untitled"))
+        description = str(comp.get("DESCRIPTION") or "").strip() or None
+        dtstart = comp.get("DTSTART")
+        if not dtstart:
+            continue
+        start, _all_day = _parse_dt(dtstart)
+        due_date = start[:10]
+
+        existing = db.execute(
+            "SELECT id FROM tasks WHERE source_calendar_id = ? AND source_uid = ?",
+            (calendar_id, uid),
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE tasks SET title=?, description=?, due_date=?, updated_at=? WHERE id=?",
+                (title, description, due_date, _now(), existing["id"]),
+            )
+        else:
+            task = Task(
+                title=title,
+                description=description,
+                due_date=due_date,
+                source_type="ics_import",
+                source_uid=uid,
+                source_calendar_id=calendar_id,
+            )
+            task.db_push(db)
+            count += 1
+    db.commit()
+    return count
+
+
 def fetch_and_store(db, calendar_id, ics_url):
     resp = httpx.get(ics_url, follow_redirects=True, timeout=30)
     resp.raise_for_status()
+    row = db.execute("SELECT import_as FROM calendars WHERE id = ?", (calendar_id,)).fetchone()
+    if row and row["import_as"] == "tasks":
+        return store_tasks(db, calendar_id, resp.content)
     return store_events(db, calendar_id, resp.content)

@@ -479,21 +479,27 @@ def test_passive_rag():
     from services.ai.service import AIService
     from services.ai.gemini_provider import GeminiProvider
     svc = AIService(GeminiProvider())
-    reply = svc.chat(get_db(), [{"role": "user",
+    reply, sources = svc.chat(get_db(), [{"role": "user",
         "content": "what do I know about quantum chromodynamics and quarks?"}])
     terms = ["quark", "qcd", "gluon", "confinement", "chromodynamics"]
     hits  = [t for t in terms if t in reply.lower()]
-    cited = any(x in reply for x in ["_test_qcd", "classes/", "QCD", "Quarks"])
-    passed = len(hits) >= 2
+    # Sources must be surfaced separately, not cited inline in the answer text itself.
+    has_source_chip = any("classes/" in (s.get("source") or "") for s in sources)
+    inline_citation  = any(x in reply for x in ["_test_qcd", "classes/"])
+    passed = len(hits) >= 2 and has_source_chip and not inline_citation
     record(
-        name="Passive RAG — AI answers using vault note content",
-        metric="Does the AI reply contain ≥2 terms from the QCD note?",
-        result=f"Terms found: {hits}\nCitation present: {cited}\nFull reply:\n{reply}",
+        name="Passive RAG — AI answers using vault content, cites via separate sources list",
+        metric="Reply has ≥2 QCD terms, sources list has a classes/ path, reply text has no inline path citation",
+        result=(f"Terms found: {hits}\nSources: {sources}\n"
+                f"Inline citation present (should be False): {inline_citation}\nFull reply:\n{reply}"),
         passed=passed,
         explanation=(
-            "The QCD note should be automatically retrieved and injected before the AI call. "
-            + (f"AI used vault content — found terms: {hits}." if passed
-               else f"Only found {hits} — vault content may not have been injected correctly.")
+            "The QCD note should be retrieved and used, with its source surfaced in the "
+            "separate `sources` list returned alongside the reply — not named inline in the "
+            "answer text. "
+            + ("Correct on all three counts." if passed
+               else f"Failed — terms_ok={len(hits) >= 2}, source_chip_ok={has_source_chip}, "
+                    f"no_inline_citation={not inline_citation}.")
         ),
     )
 
@@ -501,13 +507,13 @@ def test_gk_fallback():
     from services.ai.service import AIService
     from services.ai.gemini_provider import GeminiProvider
     svc = AIService(GeminiProvider())
-    reply = svc.chat(get_db(), [{"role": "user",
+    reply, sources = svc.chat(get_db(), [{"role": "user",
         "content": "what is the boiling point of tungsten?"}])
     has_gk = "(GK)" in reply
     record(
         name="(GK) fallback — AI labels general knowledge answers",
         metric="Does the reply contain the literal string '(GK)'?",
-        result=f"(GK) present: {has_gk}\nFull reply:\n{reply}",
+        result=f"(GK) present: {has_gk}\nSources: {sources}\nFull reply:\n{reply}",
         passed=has_gk,
         explanation=(
             "When answering from general knowledge (nothing in vault), the AI must append '(GK)'. "
@@ -521,7 +527,7 @@ def test_search_vault_tool():
     from services.ai.service import AIService
     from services.ai.gemini_provider import GeminiProvider
     svc = AIService(GeminiProvider())
-    reply = svc.chat(get_db(), [{"role": "user",
+    reply, sources = svc.chat(get_db(), [{"role": "user",
         "content": "search my notes for anything about color confinement and quarks"}])
     terms = ["confinement", "quark", "qcd", "gluon", "chromodynamics"]
     hits  = [t for t in terms if t in reply.lower()]
@@ -529,7 +535,7 @@ def test_search_vault_tool():
     record(
         name="search_vault tool — active retrieval returns vault content",
         metric="Does the AI reply (via search_vault tool) contain terms from the QCD note?",
-        result=f"Terms found: {hits}\nFull reply:\n{reply}",
+        result=f"Terms found: {hits}\nSources: {sources}\nFull reply:\n{reply}",
         passed=passed,
         explanation=(
             "Asking the AI to 'search my notes' should trigger the search_vault tool call, "
@@ -547,7 +553,7 @@ def test_create_note_tool():
     before = set(os.listdir(ai_gen_dir)) if os.path.isdir(ai_gen_dir) else set()
 
     svc = AIService(GeminiProvider())
-    reply = svc.chat(get_db(), [{"role": "user",
+    reply, sources = svc.chat(get_db(), [{"role": "user",
         "content": ("Save a short note about RAG pipelines retrieving context for LLMs. "
                     "Title: 'RAG Pipeline Overview'. Filename: rag-pipeline-overview")}])
 

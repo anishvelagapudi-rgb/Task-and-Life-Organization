@@ -118,10 +118,13 @@
     flex: 1;
     resize: none;
     height: 44px;
+    max-height: 40vh;
     line-height: 1.5;
     padding: 10px 12px;
     font-size: 14px;
     border-radius: 6px;
+    overflow-y: auto;
+    white-space: pre-wrap;
   }
 
   #send-btn {
@@ -159,6 +162,31 @@
     border-radius: 10px;
     background: var(--surface);
   }
+
+  /* source citations — shown as a separate footnote under an assistant reply,
+     never inline in the message text itself */
+  .msg-sources {
+    align-self: flex-start;
+    max-width: 84%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: -6px;
+    font-size: 11px;
+  }
+  .msg-sources .src-label {
+    color: var(--muted);
+    align-self: center;
+  }
+  .msg-sources .src-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
 </style>
 
 <div class="chat-wrap">
@@ -181,6 +209,14 @@
   <div class="chat-history" id="history">
     {% for m in messages %}
     <div class="msg {{ m.role }}">{{ m.content }}</div>
+    {% if m.sources %}
+    <div class="msg-sources">
+      <span class="src-label">Sources:</span>
+      {% for s in m.sources %}
+      <span class="src-chip">{{ s.source }}{% if s.heading %} § {{ s.heading }}{% endif %}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
     {% endfor %}
     {% if not messages %}
     <div class="sys-msg">New chat — ask about your tasks, notes, or anything on your mind.</div>
@@ -222,11 +258,34 @@
     historyEl.scrollTop = historyEl.scrollHeight;
   }
 
+  // Renders sources as a separate footnote/aside under an assistant reply —
+  // never inline in the message text. Built with createElement/textContent
+  // (not innerHTML) since source paths could theoretically contain markup-like
+  // characters and this must stay XSS-safe like the rest of this file.
+  function appendSources(sources) {
+    if (!sources || !sources.length) return;
+    const div = document.createElement('div');
+    div.className = 'msg-sources';
+    const label = document.createElement('span');
+    label.className = 'src-label';
+    label.textContent = 'Sources:';
+    div.appendChild(label);
+    for (const s of sources) {
+      const chip = document.createElement('span');
+      chip.className = 'src-chip';
+      chip.textContent = s.heading ? `${s.source} § ${s.heading}` : s.source;
+      div.appendChild(chip);
+    }
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
 
     inputEl.value = '';
+    autoResize();
     sendBtn.disabled = true;
 
     // Remove the "new chat" placeholder if present
@@ -253,6 +312,7 @@
         appendMsg('assistant', 'Error: ' + (data?.error || `Server error (${res.status})`));
       } else {
         appendMsg('assistant', data.reply);
+        appendSources(data.sources);
         // Update page title to reflect auto-title on first message
         if (document.getElementById('chat-title').textContent === 'New Chat') {
           const titleRes = await fetch(`/chat/${CHAT_ID}`);
@@ -278,6 +338,12 @@
       sendMessage();
     }
   });
+
+  function autoResize() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.4) + 'px';
+  }
+  inputEl.addEventListener('input', autoResize);
 
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;

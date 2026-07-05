@@ -100,6 +100,13 @@
   .fc .fc-timegrid-slot { border-color: var(--border); }
   .fc .fc-timegrid-slot-label { font-size: 11px; color: var(--muted); }
 
+  /* Task deadlines render as list-item markers (dot + label), not solid blocks —
+     deliberately distinct from real time-blocked events, Canvas-assignment-style. */
+  .fc-task-deadline .fc-list-event-title,
+  .fc-task-deadline .fc-daygrid-event-dot { border-color: #ffb84a; }
+  .fc-task-deadline .fc-event-title::before { content: "⚑ "; }
+  .fc-task-deadline .fc-event-title { font-style: italic; }
+
   /* ── modals ── */
   dialog {
     background: var(--surface);
@@ -147,7 +154,7 @@
       <label class="cal-toggle-label">
         <input type="checkbox" class="local-cal-toggle" data-cal-id="{{ cal.id }}" checked>
         <span class="cal-dot" style="background:{{ cal.color }}"></span>
-        <span class="cal-name">{{ cal.name }}</span>
+        <span class="cal-name">{{ cal.name }}{% if cal.import_as == 'tasks' %} <span style="color:var(--muted);font-weight:400">(→ Tasks)</span>{% endif %}</span>
       </label>
       <div class="cal-item-actions">
         {% if cal.ics_url %}
@@ -179,8 +186,11 @@
       <label class="cal-toggle-label">
         <input type="checkbox" id="toggle-tasks" checked>
         <span class="cal-dot" style="background:#ffb84a"></span>
-        <span class="cal-name">Task Deadlines</span>
+        <span class="cal-name">⚑ Task Deadlines</span>
       </label>
+    </div>
+    <div style="font-size:11px;color:var(--muted);padding:2px 0 0 17px">
+      Deadlines only, not scheduled time — click to open the task.
     </div>
   </div>
 </aside>
@@ -204,7 +214,7 @@
     <div class="field">
       <label>Calendar</label>
       <select id="event-cal-id">
-        {% for cal in local_cals %}
+        {% for cal in local_cals if cal.import_as != 'tasks' %}
         <option value="{{ cal.id }}">{{ cal.name }}</option>
         {% endfor %}
       </select>
@@ -264,7 +274,14 @@
     </div>
     <div class="field" id="ics-field">
       <label>ICS URL <span style="color:var(--muted);font-weight:400">(optional — for Canvas or external feeds)</span></label>
-      <input type="url" id="cal-ics-url" placeholder="https://…">
+      <input type="url" id="cal-ics-url" placeholder="https://…" oninput="updateImportAsVisibility()">
+    </div>
+    <div class="field" id="import-as-field" style="display:none">
+      <label>Import as</label>
+      <select id="cal-import-as">
+        <option value="events">Calendar events</option>
+        <option value="tasks">Tasks (deadlines — e.g. Canvas assignments)</option>
+      </select>
     </div>
     <div class="modal-actions">
       <button type="submit" class="btn">Save</button>
@@ -451,8 +468,15 @@ function openNewCalModal() {
   document.getElementById('cal-modal-title').textContent = 'New Calendar';
   document.getElementById('cal-delete-btn').style.display = 'none';
   document.getElementById('ics-field').style.display = '';
+  document.getElementById('cal-import-as').value = 'events';
+  updateImportAsVisibility();
   selectColor('#4a9eff');
   document.getElementById('cal-modal').showModal();
+}
+
+function updateImportAsVisibility() {
+  const hasIcs = document.getElementById('cal-ics-url').value.trim().length > 0;
+  document.getElementById('import-as-field').style.display = hasIcs ? '' : 'none';
 }
 
 function openEditCalModal(data) {
@@ -462,6 +486,8 @@ function openEditCalModal(data) {
   document.getElementById('cal-modal-title').textContent = 'Edit Calendar';
   document.getElementById('cal-delete-btn').style.display = '';
   document.getElementById('ics-field').style.display = 'none';
+  document.getElementById('import-as-field').style.display = data.source === 'ics' ? '' : 'none';
+  document.getElementById('cal-import-as').value = data.import_as || 'events';
   selectColor(data.color || '#4a9eff');
   document.getElementById('cal-modal').showModal();
 }
@@ -476,6 +502,9 @@ async function submitCal(e) {
   if (!id) {
     const ics = document.getElementById('cal-ics-url').value.trim();
     if (ics) body.ics_url = ics;
+  }
+  if (document.getElementById('import-as-field').style.display !== 'none') {
+    body.import_as = document.getElementById('cal-import-as').value;
   }
   const resp = await fetch(id ? `/calendar/api/calendars/${id}` : '/calendar/api/calendars', {
     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
@@ -502,8 +531,11 @@ async function deleteCal() {
 async function syncCal(id) {
   const resp = await fetch(`/calendar/api/calendars/${id}/sync`, { method: 'POST' });
   const data = await resp.json().catch(() => ({}));
-  if (resp.ok) { fcal.refetchEvents(); alert(`Sync complete. ${data.imported || 0} new events imported.`); }
-  else alert(data.error || 'Sync failed.');
+  if (resp.ok) {
+    fcal.refetchEvents();
+    const kind = data.imported_as === 'tasks' ? 'new tasks' : 'new events';
+    alert(`Sync complete. ${data.imported || 0} ${kind} imported.`);
+  } else alert(data.error || 'Sync failed.');
 }
 
 // ── Color picker ─────────────────────────────────────────────────────────────

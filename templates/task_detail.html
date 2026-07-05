@@ -13,6 +13,11 @@
     </div>
     {% endif %}
     <h1 style="margin:0;">{{ task.title }}</h1>
+    {% if source_calendar_name %}
+    <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+      ⟳ Synced from "{{ source_calendar_name }}" — title/description/due date update on next sync; status is yours to keep.
+    </div>
+    {% endif %}
   </div>
   <div class="actions">
     <span class="badge {{ task.status }}">{{ task.status }}</span>
@@ -100,15 +105,6 @@
           </select>
         </div>
         <div class="field">
-          <label>Energy Type</label>
-          <select name="energy_type">
-            <option value="">—</option>
-            {% for e in ['deep_focus','light_admin','creative','social','low_energy'] %}
-            <option value="{{ e }}" {% if task.energy_type == e %}selected{% endif %}>{{ e }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="field">
           <label>Project</label>
           <select name="project_id">
             <option value="">—</option>
@@ -117,23 +113,17 @@
             {% endfor %}
           </select>
         </div>
-      </div>
-      <div class="row">
         <div class="field">
           <label>Due Date</label>
-          <input type="date" name="due_date" value="{{ task.due_date or '' }}">
+          <input type="date" name="due_date" id="edit-task-due-date" value="{{ task.due_date or '' }}" {% if task.recurring %}disabled{% endif %}>
         </div>
         <div class="field">
-          <label>Effort (min)</label>
-          <input type="number" name="estimated_effort" value="{{ task.estimated_effort or '' }}" min="1">
-        </div>
-        <div class="field">
-          <label>Fear (1–10)</label>
-          <input type="number" name="fear_level" value="{{ task.fear_level or '' }}" min="1" max="10">
-        </div>
-        <div class="field">
-          <label>Ambiguity (1–10)</label>
-          <input type="number" name="ambiguity_level" value="{{ task.ambiguity_level or '' }}" min="1" max="10">
+          <label>Recurring</label>
+          <select name="recurring" id="edit-task-recurring">
+            <option value="" {% if not task.recurring %}selected{% endif %}>— none —</option>
+            <option value="daily" {% if task.recurring == 'daily' %}selected{% endif %}>Daily</option>
+            <option value="weekly" {% if task.recurring == 'weekly' %}selected{% endif %}>Weekly</option>
+          </select>
         </div>
       </div>
       <div class="row">
@@ -156,26 +146,70 @@
                  placeholder="e.g. coding, research">
         </div>
       </div>
+
+      <!-- psychological fields — AI-inferred, hidden by default. Never default-visible
+           data entry (see STATUS.md); opt-in via this disclosure only. -->
+      <details style="margin: 4px 0 8px;">
+        <summary style="cursor:pointer; font-size:12px; color:var(--muted); user-select:none;">
+          Psychological fields (AI-inferred) — click to view or edit{% if task.psych_reasoning %} · AI reasoning available{% endif %}
+        </summary>
+        <div style="margin-top:12px;">
+          {% if task.psych_reasoning %}
+          <div class="card" style="padding:10px 14px; margin-bottom:12px; background:rgba(74,158,255,0.06); border-color:#2a4060;">
+            <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:4px;">AI reasoning</div>
+            <div style="font-size:13px; color:var(--text);">{{ task.psych_reasoning }}</div>
+          </div>
+          {% else %}
+          <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">No AI reasoning recorded for these fields.</div>
+          {% endif %}
+          <div class="row">
+            <div class="field">
+              <label>Energy Type</label>
+              <select name="energy_type">
+                <option value="">—</option>
+                {% for e in ['deep_focus','light_admin','creative','social','low_energy'] %}
+                <option value="{{ e }}" {% if task.energy_type == e %}selected{% endif %}>{{ e }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field">
+              <label>Effort (min)</label>
+              <input type="number" name="estimated_effort" value="{{ task.estimated_effort or '' }}" min="1">
+            </div>
+            <div class="field">
+              <label>Fear (1–5)</label>
+              <input type="number" name="fear_level" value="{{ task.fear_level or '' }}" min="1" max="5">
+            </div>
+            <div class="field">
+              <label>Ambiguity (1–5)</label>
+              <input type="number" name="ambiguity_level" value="{{ task.ambiguity_level or '' }}" min="1" max="5">
+            </div>
+          </div>
+        </div>
+      </details>
+
       <div class="actions">
         <button type="submit">Save</button>
-        <!-- separate form so this POST isn't tied to the edit fields -->
-        <form action="/tasks/{{ task.id }}/complete" method="POST" style="display:inline;">
-          {% if task.status == 'done' %}
-          <button type="submit" style="background:transparent; border:1px solid var(--warn); color:var(--warn);">
-            ↩ Revert
-          </button>
-          {% else %}
-          <button type="submit" style="background:transparent; border:1px solid var(--success); color:var(--success);">
-            ✓ Complete
-          </button>
-          {% endif %}
-        </form>
-        <form method="POST" action="/tasks/{{ task.id }}/delete" style="margin:0;"
-              onsubmit="return confirm('Delete this task?')">
-          <button type="submit" class="btn btn-danger">Delete</button>
-        </form>
       </div>
     </form>
+    <!-- separate forms, outside the edit form, so these POSTs aren't tied to (or nested inside) the edit fields -->
+    <div class="actions" style="margin-top:8px;">
+      <form action="/tasks/{{ task.id }}/complete" method="POST" style="display:inline; margin:0;">
+        {% if task.status == 'done' %}
+        <button type="submit" style="background:transparent; border:1px solid var(--warn); color:var(--warn);">
+          ↩ Revert
+        </button>
+        {% else %}
+        <button type="submit" style="background:transparent; border:1px solid var(--success); color:var(--success);">
+          ✓ Complete
+        </button>
+        {% endif %}
+      </form>
+      <form method="POST" action="/tasks/{{ task.id }}/delete" style="margin:0;"
+            onsubmit="return confirm('Delete this task?')">
+        <button type="submit" class="btn btn-danger">Delete</button>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -192,7 +226,7 @@
 //   { id, title, status, priority, parent_task_id }
 // parent_task_id === null means the task is a root-level task.
 // The browser uses this to build the tree — the server never constructs one.
-const ALL_TASKS  = {{ all_tasks_json | safe }};
+const ALL_TASKS  = {{ all_tasks | tojson }};
 const CURRENT_ID = {{ task.id | tojson }};   // the task this page is showing
 const ROOT_ID    = {{ root_id | tojson }};   // topmost ancestor of CURRENT_ID
 
@@ -300,6 +334,18 @@ if (btnSubtree && btnFulltree) {
     btnSubtree.className  = 'btn-ghost btn-sm';
   });
 }
+
+// ── recurring tasks must not have a due date — disable/clear it when Recurring is set ──
+(function () {
+  const recurringSelect = document.getElementById('edit-task-recurring');
+  const dueDateInput = document.getElementById('edit-task-due-date');
+  if (!recurringSelect || !dueDateInput) return;
+  recurringSelect.addEventListener('change', () => {
+    const isRecurring = recurringSelect.value !== '';
+    dueDateInput.disabled = isRecurring;
+    if (isRecurring) dueDateInput.value = '';
+  });
+})();
 </script>
 
 {% endblock %}

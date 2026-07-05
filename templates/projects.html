@@ -7,29 +7,32 @@
 <div class="section">
   <h2>All Projects</h2>
   {% if projects %}
-  <table>
+  <table id="project-table">
     <thead>
       <tr>
         <th>Title</th>
         <th>Status</th>
-        <th>Progress</th>
         <th>Description</th>
+        <th class="complete-col"></th>
+        <th class="delete-col"></th>
       </tr>
     </thead>
     <tbody>
       {% for p in projects %}
-      <tr>
+      <tr data-status="{{ p.status }}">
         <td><a href="/projects/{{ p.id }}">{{ p.title }}</a></td>
-        <td><span class="badge {{ p.status }}">{{ p.status }}</span></td>
-        <td>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <div style="width: 80px; height: 4px; background: var(--border); border-radius: 2px;">
-              <div style="width: {{ p.progress }}%; height: 100%; background: var(--accent); border-radius: 2px;"></div>
-            </div>
-            <span style="color: var(--muted); font-size: 12px;">{{ p.progress }}%</span>
-          </div>
-        </td>
+        <td><span class="badge {{ p.status }} status-badge">{{ p.status }}</span></td>
         <td style="color: var(--muted);">{{ p.description or '—' }}</td>
+        <td class="complete-col">
+          <button class="js-toggle-complete" data-id="{{ p.id }}" title="Toggle complete">
+            {{ '↩' if p.status == 'completed' else '✓' }}
+          </button>
+        </td>
+        <td class="delete-col">
+          <button class="js-delete-project" data-id="{{ p.id }}" title="Delete project">
+            🗑
+          </button>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -38,6 +41,45 @@
   <p class="empty">No projects yet.</p>
   {% endif %}
 </div>
+
+<script>
+// toggles a project between completed and active without a page reload.
+function toggleProjectComplete(btn, projectId) {
+  fetch(`/projects/${projectId}/complete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(r => r.json())
+  .then(data => {
+    const row = btn.closest('tr');
+    row.dataset.status = data.status;
+    const badge = row.querySelector('.status-badge');
+    badge.className   = `badge ${data.status} status-badge`;
+    badge.textContent = data.status;
+    btn.textContent   = data.status === 'completed' ? '↩' : '✓';
+  });
+}
+
+function deleteProject(btn, projectId) {
+  if (!confirm('Delete this project? This cannot be undone.')) return;
+  fetch(`/projects/${projectId}/delete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(() => btn.closest('tr').remove());
+}
+
+// project IDs are UUID strings, which broke when interpolated straight into
+// an onclick="..." attribute (the JSON-quoted id closes the attribute's own
+// quotes early and mangles the tag). Delegated data-id listeners avoid that.
+document.getElementById('project-table')?.addEventListener('click', e => {
+  const completeBtn = e.target.closest('.js-toggle-complete');
+  if (completeBtn) return toggleProjectComplete(completeBtn, completeBtn.dataset.id);
+
+  const deleteBtn = e.target.closest('.js-delete-project');
+  if (deleteBtn) return deleteProject(deleteBtn, deleteBtn.dataset.id);
+});
+</script>
 
 <div class="section">
   <h2>New Project</h2>

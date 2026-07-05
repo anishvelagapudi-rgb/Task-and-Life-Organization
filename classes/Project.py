@@ -20,36 +20,40 @@ class Project:
         self.updated_at = datetime.now(timezone.utc)
 
     def db_push(self, conn):
-        """Insert or update this project in the database. Sets self.id on insert."""
+        """Insert or update this project in the database. Sets self.id on insert.
+
+        Builds a {column: value} dict from a hardcoded literal (never from external
+        input or raw self.__dict__) and derives the INSERT/UPDATE statements from it —
+        same dict-driven pattern as Task.db_push, avoiding hand-maintained parallel
+        column/placeholder/parameter lists."""
         self.updated_at = datetime.now(timezone.utc)
         cursor = conn.cursor()
 
         existing = cursor.execute("SELECT id FROM projects WHERE id = ?", (self.id,)).fetchone()
+
+        fields = {
+            "title": self.title,
+            "description": self.description,
+            "status": self.status,
+            "progress": self.progress,
+        }
+
         if existing is None:
+            fields["id"] = self.id
+            fields["created_at"] = self.created_at
+            fields["updated_at"] = self.updated_at
+            cols = ", ".join(fields)
+            placeholders = ", ".join("?" * len(fields))
             cursor.execute(
-                """
-                INSERT INTO projects (
-                    id, title, description, status,
-                    progress, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    self.id, self.title, self.description, self.status,
-                    self.progress, self.created_at, self.updated_at,
-                ),
+                f"INSERT INTO projects ({cols}) VALUES ({placeholders})",
+                list(fields.values()),
             )
         else:
+            fields["updated_at"] = self.updated_at
+            set_clause = ", ".join(f"{k}=?" for k in fields)
             cursor.execute(
-                """
-                UPDATE projects SET
-                    title=?, description=?, status=?,
-                    progress=?, updated_at=?
-                WHERE id=?
-                """,
-                (
-                    self.title, self.description, self.status,
-                    self.progress, self.updated_at, self.id,
-                ),
+                f"UPDATE projects SET {set_clause} WHERE id=?",
+                [*fields.values(), self.id],
             )
 
         conn.commit()

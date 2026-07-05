@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import dateparser
 from dateparser.search import search_dates
 
+from db import enforce_recurring_invariant
 from .provider import AIProvider
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,23 @@ TASK FIELDS YOU'LL SEE:
 - estimated_effort: minutes of expected work
 - priority: critical | high | medium | low
 - status: inbox | active | done | blocked
+- recurring: null (one-off) | "daily" | "weekly" — a recurring task auto-resets to
+  not-done at the start of the next day/week after it's completed. Recurring tasks
+  must NEVER have a due_date — if you set recurring on create_task or update_task,
+  any due_date you also pass is ignored and cleared server-side. Only set recurring
+  when the user explicitly describes a repeating habit/chore, not for one-off tasks.
+
+These 4 psychological fields (fear_level, ambiguity_level, energy_type,
+estimated_effort) are never shown to the user as a data-entry form by default — you
+are expected to infer them yourself when creating or updating a task, based on how
+the user describes it (tone, hedging, vagueness about what "done" looks like, stated
+or implied deadline pressure, etc.). Whenever you set or change any of these 4 fields
+via create_task or update_task, you MUST also pass psych_reasoning: a short 1-2
+sentence explanation of why you inferred those specific values. This is shown to the
+user directly next to the fields so they can see and correct your reasoning — never
+skip it when you set one of these fields, and never fabricate a reason if you didn't
+actually infer anything (e.g. don't set psych_reasoning if the user gave you an
+explicit number for one of these and you were not inferring anything).
 
 RECOMMENDATION PHILOSOPHY:
 Recommend tasks that maximize: urgency + actionability + momentum - resistance.
@@ -40,7 +58,10 @@ and inbox (unsorted or recently added files).
 
 Rules for vault usage:
 - Prefer vault content over general knowledge when answering questions about the user's life/work.
-- Cite the source file when using vault content (e.g. "According to projects/cs101.md...").
+- Do NOT cite source filenames or paths inline in your answer text (e.g. do not write things
+  like "According to projects/cs101.md..."). The app surfaces sources separately as a footnote
+  below your reply — just answer naturally using the vault content, without naming where it
+  came from in the text itself.
 - If no vault context was retrieved and you're using general knowledge, you MUST literally
   append the exact characters "(GK)" to the end of your response — no exceptions. Then on
   a new line, ask if the user wants you to search the vault more broadly. Example ending:
@@ -53,6 +74,10 @@ Rules for vault usage:
   entire document, not just relevant snippets. The path is vault-relative (e.g. 'reference/unc-cs-requirements.html').
 - Use create_note to save important insights to the vault when the user asks or when you spot
   a clear knowledge gap worth documenting.
+- Use find_connections when the user asks how a note relates to their other notes, what
+  connects to something, or wants a different angle on how they're thinking about a topic —
+  it surfaces non-obvious cross-folder links, not simple keyword/topic matches (that's what
+  search_vault is for).
 
 CALENDAR:
 The user has a local calendar and, optionally, a connected Google Calendar. When a calendar
@@ -120,11 +145,21 @@ TOOLS = [
                     "priority":         {"type": "string", "enum": ["critical", "high", "medium", "low"]},
                     "status":           {"type": "string", "enum": ["inbox", "active", "blocked"]},
                     "energy_type":      {"type": "string", "enum": ["deep_focus", "light_admin", "social", "creative", "low_energy"]},
-                    "due_date":         {"type": "string", "description": "YYYY-MM-DD"},
+                    "due_date":         {"type": "string", "description": "YYYY-MM-DD. Ignored/cleared if recurring is also set."},
                     "project_id":       {"type": "integer"},
                     "fear_level":       {"type": "integer", "minimum": 1, "maximum": 5},
                     "ambiguity_level":  {"type": "integer", "minimum": 1, "maximum": 5},
                     "estimated_effort": {"type": "integer", "description": "Minutes"},
+                    "recurring":        {"type": "string", "enum": ["daily", "weekly"], "description": "Only for repeating habits/chores. Never combine with due_date."},
+                    "psych_reasoning":  {
+                        "type": "string",
+                        "description": (
+                            "Required whenever you set fear_level, ambiguity_level, energy_type, "
+                            "or estimated_effort on this call: a short (1-2 sentence) explanation "
+                            "of why you inferred those specific values. Shown to the user next to "
+                            "the fields so they can see and correct your reasoning."
+                        ),
+                    },
                 },
                 "required": ["title"],
             },
@@ -172,11 +207,21 @@ TOOLS = [
                     "priority":         {"type": "string", "enum": ["critical", "high", "medium", "low"]},
                     "status":           {"type": "string", "enum": ["inbox", "active", "done", "blocked"]},
                     "energy_type":      {"type": "string", "enum": ["deep_focus", "light_admin", "social", "creative", "low_energy"]},
-                    "due_date":         {"type": "string", "description": "YYYY-MM-DD"},
+                    "due_date":         {"type": "string", "description": "YYYY-MM-DD. Ignored/cleared if recurring is also set."},
                     "project_id":       {"type": "integer"},
                     "fear_level":       {"type": "integer", "minimum": 1, "maximum": 5},
                     "ambiguity_level":  {"type": "integer", "minimum": 1, "maximum": 5},
                     "estimated_effort": {"type": "integer", "description": "Minutes"},
+                    "recurring":        {"type": "string", "enum": ["daily", "weekly"], "description": "Only for repeating habits/chores. Never combine with due_date."},
+                    "psych_reasoning":  {
+                        "type": "string",
+                        "description": (
+                            "Required whenever you change fear_level, ambiguity_level, energy_type, "
+                            "or estimated_effort on this call: a short (1-2 sentence) explanation "
+                            "of why you inferred those specific values. Shown to the user next to "
+                            "the fields so they can see and correct your reasoning."
+                        ),
+                    },
                 },
                 "required": ["id"],
             },
@@ -324,6 +369,31 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_connections",
+            "description": (
+                "Find non-obvious connections between a vault note and other notes — "
+                "moderate cross-folder semantic overlap the user likely hasn't noticed, "
+                "as opposed to straightforward similarity search (use search_vault for that). "
+                "Use when the user asks how notes relate to each other, asks what connects "
+                "to a specific note, or wants to be challenged on how they're thinking about "
+                "something."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Vault-relative path of the note to find connections for (e.g. 'journal/2026-06-20.md')",
+                    },
+                    "k": {"type": "integer", "description": "Max connections to return (1-10, default 5)"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 _EVENT_WRITE_FIELDS = {
@@ -334,6 +404,7 @@ _EVENT_WRITE_FIELDS = {
 _TASK_WRITE_FIELDS = {
     "title", "description", "priority", "status", "energy_type",
     "due_date", "project_id", "fear_level", "ambiguity_level", "estimated_effort",
+    "psych_reasoning", "recurring",
 }
 
 _CALENDAR_WORDS = re.compile(
@@ -411,6 +482,9 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         fields = {k: v for k, v in args.items() if k in _TASK_WRITE_FIELDS}
         fields.setdefault("status", "inbox")
         fields.setdefault("priority", "medium")
+        enforce_recurring_invariant(fields)
+        if fields["status"] == "done":
+            fields["completed_at"] = _now()
         fields["id"] = str(uuid.uuid4())
         fields["ai_generated"] = 1
         fields["created_at"] = _now()
@@ -439,6 +513,19 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         updates = {k: v for k, v in args.items() if k in _TASK_WRITE_FIELDS}
         if not updates:
             return {"success": False, "error": "No valid fields to update"}
+        existing_row = db.execute("SELECT recurring, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        enforce_recurring_invariant(updates, existing_row["recurring"] if existing_row else None)
+        # completed_at isn't a model-writable field (see _TASK_WRITE_FIELDS) — derive it
+        # from the status transition instead, mirroring app.py's update_task route. Without
+        # this, the AI could mark a task 'done' with no completed_at ever set, which
+        # silently breaks recurring-task auto-reset (reset_due_recurring_tasks requires
+        # completed_at IS NOT NULL to consider a task eligible).
+        existing_status = existing_row["status"] if existing_row else None
+        if "status" in updates:
+            if updates["status"] == "done" and existing_status != "done":
+                updates["completed_at"] = _now()
+            elif updates["status"] != "done":
+                updates["completed_at"] = None
         updates["updated_at"] = _now()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", [*updates.values(), task_id])
@@ -557,16 +644,21 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             if not slug:
                 slug = "note"
             filename = slug + ".md"
-            path = os.path.join(VAULT_ROOT, "inbox", filename)
+            # AI-generated notes live in their own folder, always flagged unreviewed —
+            # never treated as ground truth by retrieval or the user (see CLAUDE.md's
+            # vault convention). Must not land in inbox/ alongside the user's own notes.
+            path = os.path.join(VAULT_ROOT, "ai_generated", filename)
 
             if os.path.exists(path):
                 ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                path = os.path.join(VAULT_ROOT, "inbox", f"{slug}-{ts}.md")
+                path = os.path.join(VAULT_ROOT, "ai_generated", f"{slug}-{ts}.md")
 
             meta = {
                 "title": args["title"],
                 "topic": args["topic"],
                 "tags": args.get("tags", []),
+                "ai_generated": True,
+                "reviewed": False,
                 "created_at": _now(),
                 "updated_at": _now(),
             }
@@ -586,6 +678,25 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         except Exception as e:
             logger.exception("create_note tool failed")
             return {"success": False, "error": str(e)}
+
+    if name == "find_connections":
+        try:
+            from services.connections.engine import discover_connections
+            path = args["path"].lstrip("/")
+            k = min(int(args.get("k", 5)), 10)
+            connections = discover_connections(path, k=k, db=db)
+            if not connections:
+                return {"found": False, "message": "No non-obvious connections found for this note."}
+            return {
+                "found": True,
+                "connections": [
+                    {"target": c.target_path, "summary": c.summary, "distance": round(c.score, 4)}
+                    for c in connections
+                ],
+            }
+        except Exception as e:
+            logger.exception("find_connections tool failed")
+            return {"found": False, "error": str(e)}
 
     return {"success": False, "error": f"Unknown tool: {name}"}
 
@@ -779,10 +890,55 @@ def _serialize_tasks(tasks: list[dict]) -> str:
             parts.append(f"energy:{t['energy_type']}")
         if t.get("estimated_effort"):
             parts.append(f"effort:{t['estimated_effort']}min")
+        if t.get("recurring"):
+            parts.append(f"recurring:{t['recurring']}")
         if t.get("description"):
             parts.append(f'desc:"{t["description"][:120]}"')
         lines.append("  " + " | ".join(parts))
     return "\n".join(lines)
+
+
+def _chunks_to_sources(chunks) -> list[dict]:
+    """Turns retrieved vault chunks into the deduped {source, heading} list the app
+    renders as a separate footnote/aside under a chat reply — never inline in the
+    answer text. Mirrors the tiny bit of path-stripping injector.py's build_context()
+    does for display, duplicated here (not imported) since injector.py is a RAG
+    pipeline file this feature must not touch."""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for c in chunks:
+        src = c.source_path
+        if "/data/vault/" in src:
+            src = src.split("/data/vault/", 1)[1]
+        elif src.startswith("chats/"):
+            src = "[past conversation]"
+        key = (src, c.heading)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"source": src, "heading": c.heading})
+    return out
+
+
+def _mask_chat_source(path: str) -> str:
+    """Indexed chat transcripts live under the internal `chats/<chat-uuid>` source path
+    — never show that raw identifier to the user. _chunks_to_sources() already does this
+    for chunk-derived sources; this covers the one other spot (_execute_tool's raw
+    search_vault result, used when search_vault runs alongside other tools in the same
+    round) that builds a source string without going through that helper."""
+    return "[past conversation]" if path.startswith("chats/") else path
+
+
+def _dedupe_sources(sources: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for s in sources:
+        key = (s.get("source"), s.get("heading"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
 
 
 class AIService:
@@ -792,7 +948,7 @@ class AIService:
     def get_recommendations(self, db) -> dict:
         rows = db.execute("""
             SELECT id, title, description, status, priority, due_date,
-                   fear_level, ambiguity_level, energy_type, estimated_effort
+                   fear_level, ambiguity_level, energy_type, estimated_effort, recurring
             FROM tasks
             WHERE status IN ('inbox', 'active')
             ORDER BY priority DESC, due_date ASC
@@ -855,9 +1011,9 @@ CURRENT PROJECTS:
         except Exception:
             return "Something went wrong on my end. Could you clarify what you meant?"
 
-    def chat(self, db, messages: list[dict], client_tz: str | None = None) -> str:
+    def chat(self, db, messages: list[dict], client_tz: str | None = None) -> tuple[str, list[dict]]:
         rows = db.execute("""
-            SELECT id, title, status, priority, due_date, fear_level, ambiguity_level, energy_type, project_id
+            SELECT id, title, status, priority, due_date, fear_level, ambiguity_level, energy_type, project_id, recurring
             FROM tasks
             WHERE status IN ('inbox', 'active')
             ORDER BY priority DESC, due_date ASC
@@ -963,6 +1119,7 @@ CURRENT TASKS:
             except Exception:
                 logger.exception("Passive calendar injection failed")
 
+        passive_chunks: list = []
         if last_user and not _should_skip_rag(last_user):
             try:
                 from services.rag.retriever import retrieve
@@ -970,6 +1127,7 @@ CURRENT TASKS:
                 chunks = retrieve(last_user, k=5)
                 ctx = build_context(chunks)
                 if ctx:
+                    passive_chunks = chunks
                     system = (
                         f"{system}\n\n{ctx}\n\n"
                         "[Note: vault context already retrieved above — "
@@ -982,17 +1140,27 @@ CURRENT TASKS:
         # Cap at 5 rounds to prevent runaway chains.
         internal = list(messages)
         last_tool_results: list[tuple[str, dict, dict]] = []
+        # Sources accumulated from any search_vault/read_document tool executions during
+        # the loop, surfaced to the caller alongside the reply so the app can render them
+        # as a separate footnote/aside rather than the model citing them inline (see
+        # _SYSTEM_PROMPT's vault-usage rules). Only used once a tool round has actually
+        # happened — before that, passive_chunks (if any) are what the first-round answer
+        # was actually grounded in.
+        used_sources: list[dict] = []
+        tool_round_happened = False
         for _ in range(5):
             reply_text, tool_calls = self.provider.chat_with_tools(system, internal, TOOLS)
 
             if not tool_calls:
                 if reply_text:
-                    return reply_text
+                    sources = used_sources if tool_round_happened else _chunks_to_sources(passive_chunks)
+                    return reply_text, _dedupe_sources(sources)
                 if last_tool_results:
-                    return "\n".join(
+                    reply = "\n".join(
                         _synthesize_tool_confirmation(n, a, r) for n, a, r in last_tool_results
                     )
-                return ""
+                    return reply, _dedupe_sources(used_sources)
+                return "", []
 
             # search_vault tool responses cause Gemini 2.5 Flash Lite to emit 0 output
             # tokens in the follow-up round (confirmed via costs.log: out=0 every time).
@@ -1001,6 +1169,7 @@ CURRENT TASKS:
             # call (no tools) — the same injection path used by passive RAG.
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "search_vault":
                 tc = tool_calls[0]
+                chunks = []
                 try:
                     from services.rag.retriever import retrieve
                     from services.rag.injector import build_context
@@ -1013,7 +1182,8 @@ CURRENT TASKS:
                     logger.exception("search_vault injection fallback failed")
                     ctx = ""
                 fresh_system = f"{base_system}\n\n{ctx}" if ctx else base_system
-                return self.provider.chat(fresh_system, messages) or ""
+                reply = self.provider.chat(fresh_system, messages) or ""
+                return reply, _chunks_to_sources(chunks)
 
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "list_events":
                 tc = tool_calls[0]
@@ -1057,7 +1227,8 @@ CURRENT TASKS:
                         lines.append(f"  [{t['id']}] {t['title']} | due:{t['due_date']} | priority:{t['priority']}")
                 ctx = "\n".join(lines)
                 fresh_system = f"{base_system}\n\n{ctx}"
-                return self.provider.chat(fresh_system, messages) or ""
+                reply = self.provider.chat(fresh_system, messages) or ""
+                return reply, []  # calendar data, not vault content — no source citation
 
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "read_document":
                 tc = tool_calls[0]
@@ -1076,11 +1247,32 @@ CURRENT TASKS:
                         f"Tell the user the file was not found in the vault.]"
                     )
                 fresh_system = f"{base_system}\n\n{ctx}"
-                return self.provider.chat(fresh_system, messages) or ""
+                reply = self.provider.chat(fresh_system, messages) or ""
+                sources = [{"source": tc["arguments"]["path"], "heading": ""}] if result.get("found") else []
+                return reply, sources
+
+            if len(tool_calls) == 1 and tool_calls[0]["name"] == "find_connections":
+                tc = tool_calls[0]
+                result = _execute_tool(db, "find_connections", tc["arguments"])
+                if result.get("found"):
+                    lines = [f"NON-OBVIOUS CONNECTIONS for {tc['arguments']['path']}:"]
+                    for c in result["connections"]:
+                        lines.append(f"  → {c['target']}: {c['summary']}")
+                    ctx = "\n".join(lines)
+                else:
+                    ctx = f"[find_connections: {result.get('message') or result.get('error') or 'no connections found'}]"
+                fresh_system = f"{base_system}\n\n{ctx}"
+                reply = self.provider.chat(fresh_system, messages) or ""
+                sources = (
+                    [{"source": c["target"], "heading": ""} for c in result["connections"]]
+                    if result.get("found") else []
+                )
+                return reply, sources
 
             # Drop passive RAG context for subsequent rounds — tool results already
             # provide the context and the combined injection causes empty Gemini responses.
             system = base_system
+            tool_round_happened = True
 
             internal.append({
                 "role": "assistant",
@@ -1102,6 +1294,14 @@ CURRENT TASKS:
             for tc in tool_calls:
                 result = _execute_tool(db, tc["name"], tc["arguments"])
                 last_tool_results.append((tc["name"], tc["arguments"], result))
+                if tc["name"] == "search_vault" and result.get("found"):
+                    for c in result["chunks"]:
+                        used_sources.append({"source": _mask_chat_source(c["source"]), "heading": c["heading"]})
+                if tc["name"] == "read_document" and result.get("found"):
+                    used_sources.append({"source": tc["arguments"]["path"], "heading": ""})
+                if tc["name"] == "find_connections" and result.get("found"):
+                    for c in result["connections"]:
+                        used_sources.append({"source": c["target"], "heading": ""})
                 internal.append({
                     "role": "tool",
                     "tool_call_id": tc["call_id"],
@@ -1110,9 +1310,10 @@ CURRENT TASKS:
 
         final_reply = self.provider.chat(base_system, internal) or ""
         if final_reply:
-            return final_reply
+            return final_reply, _dedupe_sources(used_sources)
         if last_tool_results:
-            return "\n".join(
+            reply = "\n".join(
                 _synthesize_tool_confirmation(n, a, r) for n, a, r in last_tool_results
             )
-        return ""
+            return reply, _dedupe_sources(used_sources)
+        return "", []

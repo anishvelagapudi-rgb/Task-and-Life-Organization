@@ -54,6 +54,34 @@
 
     nav a:hover, nav a.active { color: var(--text); text-decoration: none; }
 
+    /* sitewide fast-capture bar — present on every authenticated page */
+    .capture-bar {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 420px;
+      margin-left: auto;
+    }
+    #capture-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 6px 10px;
+    }
+    #capture-input:focus { border-color: var(--accent); }
+    #capture-input::placeholder { color: var(--muted); }
+    .capture-status {
+      font-size: 11px;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .capture-status.ok  { color: var(--success); }
+    .capture-status.err { color: var(--danger); }
+
     .container {
       max-width: 960px;
       margin: 0 auto;
@@ -207,12 +235,48 @@
     /* green tint on completed rows */
     tr[data-status="done"] td { background: rgba(74, 255, 145, 0.18); }
 
+    /* delete button column in task list — same layout as complete-col, danger color */
+    .delete-col { width: 28px; padding: 4px 8px 4px 4px; }
+    .delete-col button {
+      opacity: 0;
+      transition: opacity 0.1s;
+      background: transparent;
+      border: 1px solid var(--danger, #e05252);
+      color: var(--danger, #e05252);
+      padding: 2px 6px;
+      font-size: 11px;
+      border-radius: 3px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    tr:hover .delete-col button { opacity: 1; }
+
     /* subtask tree */
     .tree-row { padding: 8px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
     .tree-row:last-child { border-bottom: none; }
     .tree-row.tree-current { background: rgba(74, 158, 255, 0.07); }
     .tree-connector { color: var(--muted); margin-right: 4px; }
     .btn-active { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+
+    /* recurring tasks modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      width: 100%; max-width: 420px; max-height: 80vh;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+    }
+    .modal-body { padding: 12px 16px; overflow-y: auto; }
+    .recurring-item { margin-bottom: 8px; }
+    .recurring-item:last-child { margin-bottom: 0; }
+    .recurring-item input[type="checkbox"] { width: auto; accent-color: var(--accent); }
   </style>
 </head>
 <body>
@@ -224,9 +288,74 @@
     <a href="/calendar">Calendar</a>
     <a href="/chat">Chat</a>
     <a href="/vault">Vault</a>
+    <div class="capture-bar">
+      <input type="text" id="capture-input" placeholder="Quick capture — type a task, press Enter"
+             autocomplete="off" aria-label="Quick capture — add a task">
+      <span class="capture-status" id="capture-status" aria-live="polite"></span>
+    </div>
   </nav>
   <div class="{% block container_class %}container{% endblock %}">
     {% block content %}{% endblock %}
   </div>
+  <script>
+    (function () {
+      const input  = document.getElementById('capture-input');
+      const status = document.getElementById('capture-status');
+      if (!input) return;
+
+      let statusTimer = null;
+      function setStatus(text, cls) {
+        clearTimeout(statusTimer);
+        status.textContent = text;
+        status.className = 'capture-status' + (cls ? ' ' + cls : '');
+        statusTimer = setTimeout(() => { status.textContent = ''; status.className = 'capture-status'; }, 2500);
+      }
+
+      input.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const title = input.value.trim();
+        if (!title) return;
+
+        input.disabled = true;
+        try {
+          const res = await fetch('/capture', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title }),
+          });
+          const data = await res.json().catch(() => null);
+          if (res.ok && data && data.ok) {
+            input.value = '';
+            setStatus('Added ✓', 'ok');
+          } else {
+            setStatus('Error: ' + (data && data.error ? data.error : res.status), 'err');
+          }
+        } catch (err) {
+          setStatus('Network error', 'err');
+        }
+        input.disabled = false;
+        input.focus();
+      });
+    })();
+  </script>
+  <script>
+    // Stash the browser's IANA timezone in a cookie so server-side routes (recurring
+    // task reset, etc.) can compute local day/week boundaries instead of assuming UTC.
+    // Only rewritten when missing/stale to avoid a cookie write on every page load.
+    // Not percent-encoded: real IANA zone names only ever use letters/digits/_/+/-//,
+    // all valid cookie-value characters, and Flask/Werkzeug's cookie parser does not
+    // percent-decode values on the way back out — encoding here without a matching
+    // server-side decode would leave every zone containing "/" (i.e. almost all of
+    // them) unmatched by db.py's validator and silently falling back to UTC.
+    (function () {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const match = document.cookie.match(/(?:^|; )tz=([^;]*)/);
+      const current = match ? match[1] : null;
+      if (tz && tz !== current) {
+        document.cookie = 'tz=' + tz + '; path=/; max-age=31536000; samesite=lax';
+      }
+    })();
+  </script>
 </body>
 </html>

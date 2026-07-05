@@ -1,4 +1,4 @@
-RAG TEST RESULTS — 2026-06-27 01:54:25
+RAG TEST RESULTS — 2026-07-04 19:29:17
 ========================================================================
 
 
@@ -129,21 +129,21 @@ DETAILED RESULTS
   Result      : 16/16 correct
   Explanation : Pure task mutations should skip vault retrieval to save tokens. Knowledge questions must not be skipped. All 16 cases classified correctly.
 
-✓ [PASS]  #16  Passive RAG — AI answers using vault note content
-  Metric      : Does the AI reply contain ≥2 terms from the QCD note?
-  Result      : Terms found: ['quark', 'qcd', 'chromodynamics']
-Citation present: True
+✓ [PASS]  #16  Passive RAG — AI answers using vault content, cites via separate sources list
+  Metric      : Reply has ≥2 QCD terms, sources list has a classes/ path, reply text has no inline path citation
+  Result      : Terms found: ['quark', 'qcd', 'gluon', 'confinement', 'chromodynamics']
+Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}, {'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}]
+Inline citation present (should be False): False
 Full reply:
-Quantum chromodynamics (QCD) is the theory of the strong nuclear force, and quarks carry color charge: red, green, or blue. (GK)
-
-Want me to search your vault for anything related?
-  Explanation : The QCD note should be automatically retrieved and injected before the AI call. AI used vault content — found terms: ['quark', 'qcd', 'chromodynamics'].
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force. Quarks carry color charge, which can be red, green, or blue. Gluons are the force carriers of the strong interaction. Color confinement means that quarks cannot exist in isolation; only color-neutral combinations form hadrons like protons and neutrons.
+  Explanation : The QCD note should be retrieved and used, with its source surfaced in the separate `sources` list returned alongside the reply — not named inline in the answer text. Correct on all three counts.
 
 ✓ [PASS]  #17  (GK) fallback — AI labels general knowledge answers
   Metric      : Does the reply contain the literal string '(GK)'?
   Result      : (GK) present: True
+Sources: []
 Full reply:
-The boiling point of tungsten is approximately 5,930°C. (GK)
+The boiling point of tungsten is 5930°C. (GK)
 
 Want me to search your vault for anything related?
   Explanation : When answering from general knowledge (nothing in vault), the AI must append '(GK)'. Correct — (GK) marker present.
@@ -151,34 +151,20 @@ Want me to search your vault for anything related?
 ✓ [PASS]  #18  search_vault tool — active retrieval returns vault content
   Metric      : Does the AI reply (via search_vault tool) contain terms from the QCD note?
   Result      : Terms found: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics']
+Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}, {'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}]
 Full reply:
-[1] classes/_test_qcd.md § # Color Confinement
-# Color Confinement
+Color confinement is a principle in quantum chromodynamics (QCD) stating that quarks, which carry color charge (red, green, or blue), cannot be isolated. They can only form color-neutral combinations, such as protons and neutrons. Gluons are the force carriers of this strong interaction. (GK)
 
-…Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
-Quarks carry color charge: red, green, or blue.
-Gluons are the force carriers of the strong interaction.
-
-Color confinement means quarks cannot exist in isolation — only
-color-neutral combinations form hadrons such as protons and neutrons.
----
-
-[2] classes/_test_qcd.md § # Quarks and Gluons
-# Quarks and Gluons
-
-Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
-Quarks carry color charge: red, green, or blue.
-Gluons are the force carriers of the strong interaction.
----
+Want me to search your vault for anything related?
   Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries ChromaDB and returns chunks. Tool returned vault content — terms: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics'].
 
 ✓ [PASS]  #19  create_note tool — AI writes a file to vault/ai_generated/
   Metric      : File created + has reviewed:false + has ai_generated:true in frontmatter
-  Result      : New files: {'rag-pipeline-overview.md'}
+  Result      : New files: {'rag-pipeline-overview-20260704232934.md'}
 reviewed:false present: True
 ai_generated:true present: True
 AI reply:
-I have saved the note about RAG pipelines.
+Saved note "RAG Pipeline Overview".
   Explanation : The AI should call create_note, which writes a .md file with safety frontmatter. File created correctly with proper flags.
 
 ════════════════════════════════════════════════════════════════════════

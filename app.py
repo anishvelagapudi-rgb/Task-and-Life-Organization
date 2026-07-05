@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, render_template, request, redirect, url_for, make_response
-from db import get_db, init_db
+from db import get_db, init_db, reset_due_recurring_tasks
 
 VAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vault")
 from classes.Task import Task
@@ -179,15 +179,23 @@ def index():
 
 # ─── dashboard ────────────────────────────────────────────────────────────────
 
+def _reset_recurring(db):
+    """Reads the client's IANA timezone from the `tz` cookie (set sitewide by
+    layout.html) and runs the lazy recurring-task reset. Called from every route that
+    reads recurring-task state, so a stale 'done' status is never shown."""
+    reset_due_recurring_tasks(db, request.cookies.get('tz'))
+
+
 @app.route("/dashboard")
 def dashboard():
     if not get_current_user():
         return redirect(url_for('login'))
     db = get_db()
+    _reset_recurring(db)
     active_tasks = db.execute("""
         SELECT t.*, p.title as project_title
         FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
-        WHERE t.status IN ('inbox', 'active')
+        WHERE t.status IN ('inbox', 'active') AND t.recurring IS NULL
         ORDER BY t.priority DESC, t.due_date ASC
     """).fetchall()
     projects = db.execute("SELECT * FROM projects WHERE status = 'active' ORDER BY title").fetchall()
@@ -203,9 +211,11 @@ def get_tasks():
     if not get_current_user():
         return redirect(url_for('login'))
     db = get_db()
+    _reset_recurring(db)
     tasks = db.execute("""
         SELECT t.*, p.title as project_title
         FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
+        WHERE t.recurring IS NULL
         ORDER BY t.created_at DESC
     """).fetchall()
     return render_template("tasks.html",
@@ -213,22 +223,52 @@ def get_tasks():
                            projects=all_projects())
 
 
+@app.route("/tasks/recurring")
+def tasks_recurring():
+    """JSON backing the Daily/Weekly recurring-tasks modal on the dashboard and tasks
+    pages — recurring tasks are excluded from the normal task lists above, this is
+    their only home in the UI."""
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    db = get_db()
+    _reset_recurring(db)
+    rows = db.execute("""
+        SELECT t.id, t.title, t.status, t.recurring, t.priority, p.title as project_title
+        FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
+        WHERE t.recurring IS NOT NULL
+        ORDER BY t.title
+    """).fetchall()
+    tasks = [dict(r) for r in rows]
+    return json.dumps({
+        "daily": [t for t in tasks if t["recurring"] == "daily"],
+        "weekly": [t for t in tasks if t["recurring"] == "weekly"],
+    }), 200, {"Content-Type": "application/json"}
+
+
+def _recurring_from_form(data) -> str | None:
+    """Reads the 'recurring' form field, dropping anything that isn't daily/weekly."""
+    recurring = (data.get("recurring") or "").strip() or None
+    return recurring if recurring in ("daily", "weekly") else None
+
+
 @app.route("/tasks", methods=["POST"])
 def create_task():
     if not get_current_user():
         return redirect(url_for('login'))
     data = request.form
+    recurring = _recurring_from_form(data)
     task = Task(
         title=data["title"],
         description=data.get("description") or None,
         status=data.get("status", "inbox"),
         priority=data.get("priority", "medium"),
-        due_date=data.get("due_date") or None,
+        due_date=None if recurring else (data.get("due_date") or None),
         estimated_effort=data.get("estimated_effort") or None,
         energy_type=data.get("energy_type") or None,
         fear_level=data.get("fear_level") or None,
         ambiguity_level=data.get("ambiguity_level") or None,
         project_id=data.get("project_id") or None,
+        recurring=recurring,
     )
     task.db_push(get_db())
     return redirect(url_for("get_tasks"))
@@ -239,12 +279,20 @@ def get_task(task_id):
     if not get_current_user():
         return redirect(url_for('login'))
     db = get_db()
+    _reset_recurring(db)
 
     # fetch the full task row (all columns) for the detail view
     row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return "Task not found", 404
     task = parse_task(dict(row))
+
+    # if this task was synced in from an ICS feed, look up the source calendar's name
+    # so the UI can warn that title/description get overwritten on the next sync
+    source_calendar_name = None
+    if task.get("source_type") == "ics_import" and task.get("source_calendar_id"):
+        cal_row = db.execute("SELECT name FROM calendars WHERE id = ?", (task["source_calendar_id"],)).fetchone()
+        source_calendar_name = cal_row["name"] if cal_row else None
 
     # fetch a lightweight version of every task (only what the client needs to
     # render the tree). the browser uses parent_task_id to figure out
@@ -278,7 +326,8 @@ def get_task(task_id):
 
     return render_template("task_detail.html",
                            task=task,
-                           all_tasks_json=json.dumps(all_tasks),  # sent to JS for tree rendering
+                           source_calendar_name=source_calendar_name,
+                           all_tasks=all_tasks,  # sent to JS for tree rendering, via |tojson (escapes for safe <script> embedding)
                            root_id=root_id,
                            parent_task=parent_task,
                            dep_tasks=dep_tasks,
@@ -307,22 +356,57 @@ def update_task(task_id):
     tags_raw = data.get("tags", "").strip()
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else existing['tags']
 
+    # psych_reasoning explains *why* the AI set the 4 psych fields to their current
+    # values. If the user manually changes any of those fields on this form, the old
+    # reasoning no longer describes the new value — carrying it forward unchanged
+    # would misattribute a manual edit to the AI, so clear it whenever any of the 4
+    # fields actually changed. Only carried forward untouched when none of them did.
+    def _psych_field_changed(existing_val, form_val_raw):
+        new_val = form_val_raw or None
+        if existing_val is None and new_val is None:
+            return False
+        return str(existing_val) != str(new_val)
+
+    psych_changed = any(
+        _psych_field_changed(existing.get(f), data.get(f))
+        for f in ("fear_level", "ambiguity_level", "energy_type", "estimated_effort")
+    )
+    psych_reasoning = None if psych_changed else existing.get('psych_reasoning')
+
+    # The edit form's Status dropdown can move a task into/out of 'done' too, not just
+    # the dedicated Complete/Revert button — keep completed_at consistent with whichever
+    # one last changed it instead of always preserving (stale timestamp on a reopened
+    # task) or always wiping (breaks recurring-task reset, which needs completed_at to
+    # know when a recurring task was last finished).
+    new_status = data.get("status", "inbox")
+    if new_status == 'done' and existing['status'] != 'done':
+        completed_at = datetime.now(timezone.utc)
+    elif new_status != 'done':
+        completed_at = None
+    else:
+        completed_at = existing['completed_at']
+
+    recurring = _recurring_from_form(data)
+
     task = Task(
         id=task_id,
         title=data["title"],
         description=data.get("description") or None,
         status=data.get("status", "inbox"),
         priority=data.get("priority", "medium"),
-        due_date=data.get("due_date") or None,
+        due_date=None if recurring else (data.get("due_date") or None),
         estimated_effort=data.get("estimated_effort") or None,
         energy_type=data.get("energy_type") or None,
         fear_level=data.get("fear_level") or None,
         ambiguity_level=data.get("ambiguity_level") or None,
+        psych_reasoning=psych_reasoning,  # cleared if the user just changed one of the 4 fields it explains
         project_id=data.get("project_id") or None,
         parent_task_id=data.get("parent_task_id") or None,  # None = root-level task
         tags=tags,
         dependencies=existing['dependencies'],   # carried forward unchanged
         task_notes=existing['task_notes'],        # carried forward unchanged
+        recurring=recurring,
+        completed_at=completed_at,
     )
     task.db_push(db)
 
@@ -362,6 +446,22 @@ def complete_task(task_id):
     if request.headers.get('X-Requested-With') == 'fetch':
         return json.dumps({'status': new_status}), 200, {'Content-Type': 'application/json'}
     return redirect(request.referrer or url_for('get_tasks'))
+
+
+@app.route("/capture", methods=["POST"])
+def capture():
+    """Sitewide fast-capture: single title, saved immediately as an inbox task.
+    Equally first-class as chat-based capture — reachable from every page via the
+    nav bar in layout.html, not tied to /tasks."""
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    data = request.get_json(force=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return json.dumps({"error": "Title is required"}), 400, {"Content-Type": "application/json"}
+    task = Task(title=title, status="inbox")
+    task.db_push(get_db())
+    return json.dumps({"ok": True, "id": task.id, "title": task.title}), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/tasks/<task_id>/delete", methods=["POST"])
@@ -422,15 +522,43 @@ def update_project(project_id):
     if row is None:
         return "Project not found", 404
     data = request.form
+    # progress has no edit-form UI anymore (progress bars were removed from the
+    # frontend) — preserve whatever value the project already had instead of
+    # defaulting to 0, since it's still a valid field for external API callers.
     project = Project(
         id=project_id,
         title=data["title"],
         description=data.get("description") or None,
         status=data.get("status", "active"),
-        progress=int(data.get("progress") or 0),
+        progress=dict(row)["progress"],
     )
     project.db_push(db)
     return redirect("/projects")
+
+
+@app.route("/projects/<project_id>/complete", methods=["POST"])
+def complete_project(project_id):
+    if not get_current_user():
+        return redirect(url_for('login'))
+    db = get_db()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    row = db.execute("SELECT status FROM projects WHERE id=?", (project_id,)).fetchone()
+    if row is None:
+        return "Not found", 404
+
+    # toggle: if already completed, revert to active; otherwise mark completed
+    new_status = 'active' if row['status'] == 'completed' else 'completed'
+    db.execute(
+        "UPDATE projects SET status=?, updated_at=? WHERE id=?",
+        (new_status, now, project_id)
+    )
+    db.commit()
+
+    if request.headers.get('X-Requested-With') == 'fetch':
+        return json.dumps({'status': new_status}), 200, {'Content-Type': 'application/json'}
+    return redirect(request.referrer or url_for('get_projects'))
 
 
 # ─── chat ─────────────────────────────────────────────────────────────────────
@@ -479,9 +607,11 @@ def chat_view(chat_id):
     except Exception:
         logger.exception("GCal upcoming cache refresh failed on chat view")
     messages = [dict(m) for m in db.execute(
-        "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
+        "SELECT role, content, sources FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
         (chat_id,),
     ).fetchall()]
+    for m in messages:
+        m["sources"] = json.loads(m["sources"]) if m.get("sources") else []
     return render_template("chat.html", chat=dict(row), messages=messages)
 
 
@@ -506,13 +636,13 @@ def chat_message(chat_id):
     ).fetchall()]
 
     try:
-        reply = _ai_service.chat(db, history + [{"role": "user", "content": content}], client_tz=client_tz)
+        reply, sources = _ai_service.chat(db, history + [{"role": "user", "content": content}], client_tz=client_tz)
     except BudgetExceededError as e:
         logger.error("BUDGET EXCEEDED — AI disabled until server restart: %s", e)
-        reply = str(e)
+        reply, sources = str(e), []
     except Exception as e:
         logger.exception("chat_message failed | user_input=%r", content)
-        reply = _ai_service.explain_error(db, content, str(e))
+        reply, sources = _ai_service.explain_error(db, content, str(e)), []
 
     now = _chat_now()
     db.execute(
@@ -520,8 +650,8 @@ def chat_message(chat_id):
         (str(uuid.uuid4()), chat_id, content, now),
     )
     db.execute(
-        "INSERT INTO chat_messages (id, chat_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
-        (str(uuid.uuid4()), chat_id, reply, now),
+        "INSERT INTO chat_messages (id, chat_id, role, content, created_at, sources) VALUES (?, ?, 'assistant', ?, ?, ?)",
+        (str(uuid.uuid4()), chat_id, reply, now, json.dumps(sources) if sources else None),
     )
 
     # Auto-title from the first user message
@@ -546,7 +676,7 @@ def chat_message(chat_id):
         except Exception:
             logger.exception("Failed to re-index chat %s", chat_id)
 
-    return json.dumps({"reply": reply}), 200, {"Content-Type": "application/json"}
+    return json.dumps({"reply": reply, "sources": sources}), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/chat/<chat_id>/save", methods=["POST"])
@@ -805,6 +935,11 @@ def vault_move_file(filepath):
         os.rename(src, dest)
         index_file(dest)
         new_path = f"{dest_folder}/{os.path.basename(src)}"
+        try:
+            from services.connections.engine import delete_connections_for
+            delete_connections_for(get_db(), filepath)
+        except Exception:
+            logger.exception("Failed to clean up note_connections for moved file %s", filepath)
         return json.dumps({"ok": True, "path": new_path}), 200, {"Content-Type": "application/json"}
     except Exception as e:
         logger.exception("vault_move_file failed for %s", filepath)
@@ -824,6 +959,11 @@ def vault_delete_file(filepath):
         from services.rag.indexer import delete_file
         delete_file(abs_path)
         os.remove(abs_path)
+        try:
+            from services.connections.engine import delete_connections_for
+            delete_connections_for(get_db(), filepath)
+        except Exception:
+            logger.exception("Failed to clean up note_connections for deleted file %s", filepath)
         return json.dumps({"ok": True}), 200, {"Content-Type": "application/json"}
     except Exception as e:
         logger.exception("vault_delete_file failed for %s", filepath)
@@ -857,7 +997,17 @@ def vault_file_view(filepath):
     content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
     if request.args.get("raw"):
         return content, 200, {"Content-Type": "text/plain; charset=utf-8"}
-    return render_template("vault_file.html", filepath=filepath, content=content)
+
+    # Non-obvious cross-folder connections (services/connections/, parallel to the
+    # RAG pipeline) — best-effort, never breaks the file viewer if it fails.
+    connections = []
+    try:
+        from services.connections.engine import discover_connections
+        connections = discover_connections(filepath, k=5, db=get_db())
+    except Exception:
+        logger.exception("Connection discovery failed for %s", filepath)
+
+    return render_template("vault_file.html", filepath=filepath, content=content, connections=connections)
 
 
 # ─── calendar ─────────────────────────────────────────────────────────────────
@@ -948,14 +1098,16 @@ def calendar_api_events():
             td = dict(t)
             events.append({
                 "id": f"task_{td['id']}",
-                "title": f"⚑ {td['title']}",
+                "title": td["title"],
                 "start": td["due_date"],
                 "allDay": True,
+                "display": "list-item",
                 "backgroundColor": "#ffb84a",
                 "borderColor": "#ffb84a",
-                "textColor": "#111111",
+                "textColor": "#ffb84a",
                 "editable": False,
-                "extendedProps": {"source": "task", "task_id": td["id"]},
+                "classNames": ["fc-task-deadline"],
+                "extendedProps": {"source": "task", "task_id": td["id"], "priority": td["priority"]},
             })
 
     # GCal events (live, read-only)
@@ -1099,10 +1251,11 @@ def calendar_api_create_cal():
     new_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     ics_url = data.get("ics_url") or None
+    import_as = data.get("import_as") if data.get("import_as") in ("events", "tasks") else "events"
     db.execute(
-        """INSERT INTO calendars (id, name, color, source, ics_url, visible, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
-        (new_id, name, data.get("color", "#4a9eff"), "ics" if ics_url else "local", ics_url, now, now),
+        """INSERT INTO calendars (id, name, color, source, ics_url, import_as, visible, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+        (new_id, name, data.get("color", "#4a9eff"), "ics" if ics_url else "local", ics_url, import_as, now, now),
     )
     db.commit()
     if ics_url:
@@ -1122,8 +1275,23 @@ def calendar_api_update_cal(cal_id):
         return _json({"error": "Unauthorized"}, 401)
     db = get_db()
     data = request.get_json(force=True) or {}
-    allowed = {"name", "color", "visible"}
+    allowed = {"name", "color", "visible", "import_as"}
     updates = {k: v for k, v in data.items() if k in allowed}
+    if "import_as" in updates and updates["import_as"] not in ("events", "tasks"):
+        updates.pop("import_as")
+    if "import_as" in updates:
+        row = db.execute("SELECT import_as FROM calendars WHERE id = ?", (cal_id,)).fetchone()
+        current = (row["import_as"] if row else None) or "events"
+        if updates["import_as"] != current:
+            # Switching modes on a calendar that's already synced would either orphan
+            # its existing rows (old mode) or silently duplicate every item under the
+            # new mode on next sync — block it rather than reconcile two representations.
+            if current == "events":
+                has_data = db.execute("SELECT 1 FROM events WHERE calendar_id = ? LIMIT 1", (cal_id,)).fetchone()
+            else:
+                has_data = db.execute("SELECT 1 FROM tasks WHERE source_calendar_id = ? LIMIT 1", (cal_id,)).fetchone()
+            if has_data:
+                return _json({"error": "This calendar already has synced items. Delete and recreate it to change how it imports."}, 400)
     if not updates:
         return _json({"error": "Nothing to update"}, 400)
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1140,6 +1308,9 @@ def calendar_api_delete_cal(cal_id):
         return _json({"error": "Unauthorized"}, 401)
     db = get_db()
     db.execute("DELETE FROM events WHERE calendar_id = ?", (cal_id,))
+    # Deliberately not deleting tasks with source_calendar_id = cal_id: once imported,
+    # they're first-class tasks the user may have edited/completed — not disposable
+    # calendar-sync artifacts — so they outlive the calendar that created them.
     db.execute("DELETE FROM calendars WHERE id = ?", (cal_id,))
     db.commit()
     return _json({"ok": True})
@@ -1151,13 +1322,13 @@ def calendar_api_sync_cal(cal_id):
     if redir:
         return _json({"error": "Unauthorized"}, 401)
     db = get_db()
-    row = db.execute("SELECT ics_url FROM calendars WHERE id = ?", (cal_id,)).fetchone()
+    row = db.execute("SELECT ics_url, import_as FROM calendars WHERE id = ?", (cal_id,)).fetchone()
     if not row or not row["ics_url"]:
         return _json({"error": "No ICS URL for this calendar"}, 400)
     try:
         from services.calendar.ics_service import fetch_and_store
         count = fetch_and_store(db, cal_id, row["ics_url"])
-        return _json({"ok": True, "imported": count})
+        return _json({"ok": True, "imported": count, "imported_as": row["import_as"] or "events"})
     except Exception as e:
         logger.exception("ICS sync failed for calendar %s", cal_id)
         return _json({"error": str(e)}, 500)
@@ -1176,5 +1347,11 @@ def _start_rag():
 if __name__ == "__main__":
     import threading
     init_db(app)
-    threading.Thread(target=_start_rag, daemon=True).start()
+    # With debug=True, Werkzeug's reloader re-execs this whole module in a child
+    # process (WERKZEUG_RUN_MAIN=true there) and keeps the original as a stub
+    # watching for restarts. Without this guard, both processes ran their own
+    # indexer + vault watcher, racing to write the same ChromaDB store on every
+    # file change.
+    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        threading.Thread(target=_start_rag, daemon=True).start()
     app.run(debug=True)
