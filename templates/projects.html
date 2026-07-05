@@ -7,36 +7,53 @@
 <div class="section">
   <h2>All Projects</h2>
   {% if projects %}
-  <table id="project-table">
-    <thead>
-      <tr>
-        <th>Title</th>
-        <th>Status</th>
-        <th>Description</th>
-        <th class="complete-col"></th>
-        <th class="delete-col"></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for p in projects %}
-      <tr data-status="{{ p.status }}">
-        <td><a href="/projects/{{ p.id }}">{{ p.title }}</a></td>
-        <td><span class="badge {{ p.status }} status-badge">{{ p.status }}</span></td>
-        <td style="color: var(--muted);">{{ p.description or '—' }}</td>
-        <td class="complete-col">
-          <button class="js-toggle-complete" data-id="{{ p.id }}" title="Toggle complete">
+  <div id="project-list">
+    {% for p in projects %}
+    <details class="card project-row" data-status="{{ p.status }}">
+      <summary>
+        <span class="project-summary-title">
+          <a href="/projects/{{ p.id }}">{{ p.title }}</a>
+          <span class="badge {{ p.status }} status-badge">{{ p.status }}</span>
+        </span>
+        <span class="project-summary-desc">{{ p.description or '—' }}</span>
+        <span class="actions">
+          <button class="js-toggle-complete btn-ghost" data-id="{{ p.id }}" title="Toggle complete">
             {{ '↩' if p.status == 'completed' else '✓' }}
           </button>
-        </td>
-        <td class="delete-col">
-          <button class="js-delete-project" data-id="{{ p.id }}" title="Delete project">
+          <button class="js-delete-project btn-ghost" data-id="{{ p.id }}" title="Delete project">
             🗑
           </button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+        </span>
+      </summary>
+      <div class="project-tasks">
+        {% if p.tasks %}
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Status</th>
+              <th>Priority</th>
+              <th>Due</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for task in p.tasks %}
+            <tr>
+              <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
+              <td><span class="badge {{ task.status }}">{{ task.status }}</span></td>
+              <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
+              <td>{{ task.due_date or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No tasks linked to this project.</p>
+        {% endif %}
+      </div>
+    </details>
+    {% endfor %}
+  </div>
   {% else %}
   <p class="empty">No projects yet.</p>
   {% endif %}
@@ -51,9 +68,9 @@ function toggleProjectComplete(btn, projectId) {
   })
   .then(r => r.json())
   .then(data => {
-    const row = btn.closest('tr');
-    row.dataset.status = data.status;
-    const badge = row.querySelector('.status-badge');
+    const details = btn.closest('details');
+    details.dataset.status = data.status;
+    const badge = details.querySelector('.status-badge');
     badge.className   = `badge ${data.status} status-badge`;
     badge.textContent = data.status;
     btn.textContent   = data.status === 'completed' ? '↩' : '✓';
@@ -66,18 +83,26 @@ function deleteProject(btn, projectId) {
     method: 'POST',
     headers: { 'X-Requested-With': 'fetch' }
   })
-  .then(() => btn.closest('tr').remove());
+  .then(() => btn.closest('details').remove());
 }
 
 // project IDs are UUID strings, which broke when interpolated straight into
 // an onclick="..." attribute (the JSON-quoted id closes the attribute's own
 // quotes early and mangles the tag). Delegated data-id listeners avoid that.
-document.getElementById('project-table')?.addEventListener('click', e => {
+// preventDefault on the complete/delete buttons stops the click from also
+// toggling the <details> open/closed, since both buttons live inside <summary>.
+document.getElementById('project-list')?.addEventListener('click', e => {
   const completeBtn = e.target.closest('.js-toggle-complete');
-  if (completeBtn) return toggleProjectComplete(completeBtn, completeBtn.dataset.id);
+  if (completeBtn) {
+    e.preventDefault();
+    return toggleProjectComplete(completeBtn, completeBtn.dataset.id);
+  }
 
   const deleteBtn = e.target.closest('.js-delete-project');
-  if (deleteBtn) return deleteProject(deleteBtn, deleteBtn.dataset.id);
+  if (deleteBtn) {
+    e.preventDefault();
+    return deleteProject(deleteBtn, deleteBtn.dataset.id);
+  }
 });
 </script>
 

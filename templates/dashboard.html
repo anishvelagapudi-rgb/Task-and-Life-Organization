@@ -8,6 +8,53 @@
 </div>
 
 <div class="section">
+  <h2>Projects</h2>
+  {% if projects %}
+  <div>
+    {% for p in projects %}
+    <details class="card project-row">
+      <summary>
+        <span class="project-summary-title">
+          <a href="/projects/{{ p.id }}">{{ p.title }}</a>
+          <span class="badge {{ p.status }}">{{ p.status }}</span>
+        </span>
+        <span class="project-summary-desc">{{ p.description or '—' }}</span>
+      </summary>
+      <div class="project-tasks">
+        {% if p.tasks %}
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Status</th>
+              <th>Priority</th>
+              <th>Due</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for task in p.tasks %}
+            <tr>
+              <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
+              <td><span class="badge {{ task.status }}">{{ task.status }}</span></td>
+              <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
+              <td>{{ task.due_date or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No tasks linked to this project.</p>
+        {% endif %}
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No projects yet. <a href="/projects">Create one.</a></p>
+  {% endif %}
+</div>
+
+<div class="section">
   <h2>Active &amp; Inbox</h2>
   {% if active_tasks %}
   <table>
@@ -34,27 +81,6 @@
   </table>
   {% else %}
   <p class="empty">No active tasks.</p>
-  {% endif %}
-</div>
-
-<div class="section">
-  <h2>Projects</h2>
-  {% if projects %}
-  <div>
-    {% for p in projects %}
-    <div class="card" style="display: flex; justify-content: space-between; align-items: center;">
-      <div>
-        <a href="/projects/{{ p.id }}" style="font-weight: 500; color: var(--text);">{{ p.title }}</a>
-        {% if p.description %}<span style="color: var(--muted); margin-left: 12px; font-size: 13px;">{{ p.description }}</span>{% endif %}
-      </div>
-      <div style="display: flex; align-items: center; gap: 16px;">
-        <span class="badge {{ p.status }}">{{ p.status }}</span>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <p class="empty">No projects yet. <a href="/projects">Create one.</a></p>
   {% endif %}
 </div>
 

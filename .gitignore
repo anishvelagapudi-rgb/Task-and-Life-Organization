@@ -21,6 +21,7 @@ GOOGLE CREDENTIALS
 
 # generated api key output
 API_output.txt
+API_Key.txt
 
 # local research notes
 report.txt

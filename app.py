@@ -166,6 +166,17 @@ def all_projects():
     return [dict(r) for r in get_db().execute("SELECT * FROM projects ORDER BY title").fetchall()]
 
 
+def tasks_by_project():
+    """All tasks that belong to a project, grouped by project_id. Used to nest a
+    project's tasks inside its collapsible row on /projects and /dashboard."""
+    grouped = {}
+    for t in get_db().execute(
+        "SELECT * FROM tasks WHERE project_id IS NOT NULL ORDER BY created_at DESC"
+    ).fetchall():
+        grouped.setdefault(t["project_id"], []).append(dict(t))
+    return grouped
+
+
 # ─── index ────────────────────────────────────────────────────────────────────
 
 @app.route("/favicon.ico")
@@ -198,10 +209,15 @@ def dashboard():
         WHERE t.status IN ('inbox', 'active') AND t.recurring IS NULL
         ORDER BY t.priority DESC, t.due_date ASC
     """).fetchall()
-    projects = db.execute("SELECT * FROM projects WHERE status = 'active' ORDER BY title").fetchall()
+    projects = [dict(r) for r in db.execute(
+        "SELECT * FROM projects WHERE status = 'active' ORDER BY title"
+    ).fetchall()]
+    grouped = tasks_by_project()
+    for p in projects:
+        p["tasks"] = grouped.get(p["id"], [])
     return render_template("dashboard.html",
                            active_tasks=[dict(r) for r in active_tasks],
-                           projects=[dict(r) for r in projects])
+                           projects=projects)
 
 
 # ─── tasks ────────────────────────────────────────────────────────────────────
@@ -481,6 +497,9 @@ def get_projects():
     if not get_current_user():
         return redirect(url_for('login'))
     projects = all_projects()
+    grouped = tasks_by_project()
+    for p in projects:
+        p["tasks"] = grouped.get(p["id"], [])
     return render_template("projects.html", projects=projects)
 
 
