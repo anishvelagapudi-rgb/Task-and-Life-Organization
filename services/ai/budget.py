@@ -47,7 +47,11 @@ _INPUT_RATE  = 0.10  / 1_000_000
 _OUTPUT_RATE = 0.40  / 1_000_000
 _EMBED_RATE  = 0.025 / 1_000_000
 
-_handler = RotatingFileHandler("costs.log", maxBytes=1_000_000, backupCount=3)
+# Vercel's filesystem is read-only everywhere except /tmp — writing here at import
+# time would crash the whole app on every request if left pointed at the repo root.
+# /tmp is also always writable in local dev, so this needs no local-only branch.
+_log_dir = "/tmp" if os.environ.get("VERCEL") else "."
+_handler = RotatingFileHandler(os.path.join(_log_dir, "costs.log"), maxBytes=1_000_000, backupCount=3)
 _handler.setFormatter(logging.Formatter(
     "%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
 ))

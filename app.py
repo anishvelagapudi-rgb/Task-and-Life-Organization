@@ -31,7 +31,11 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 init_db(app)
 
 # Rotate at 1 MB, keep 3 backups → errors.log, errors.log.1, errors.log.2
-_log_handler = RotatingFileHandler("errors.log", maxBytes=1_000_000, backupCount=3)
+# Vercel's filesystem is read-only everywhere except /tmp — writing here at import
+# time would crash the whole app on every request if left pointed at the repo root.
+# /tmp is also always writable in local dev, so this needs no local-only branch.
+_log_dir = "/tmp" if os.environ.get("VERCEL") else "."
+_log_handler = RotatingFileHandler(os.path.join(_log_dir, "errors.log"), maxBytes=1_000_000, backupCount=3)
 _log_handler.setLevel(logging.ERROR)
 _log_handler.setFormatter(logging.Formatter(
     "%(asctime)s  %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
