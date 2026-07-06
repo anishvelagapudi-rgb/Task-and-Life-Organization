@@ -113,6 +113,7 @@ IMPORTANT RULES:
 - Keep replies short. Confirm what you did in one sentence. Do not list attributes or explain your work unless asked.
 - Never volunteer information, suggestions, or follow-up actions unless the user asks.
 - You ALWAYS have full access to the local calendar, and Google Calendar data is already injected into context when relevant. Never say you lack calendar access, cannot access the calendar (local or Google), or need permission. If a user asks about their calendar, use the UPCOMING EVENTS block already in context, or call list_events for local events beyond that window — do not refuse.
+- You ALWAYS have every one of the user's tasks (every status — inbox, active, done, blocked, archived) already injected into context as a CURRENT TASKS block. There is no separate tool for listing tasks — when asked to list, show, count, or summarize tasks, answer directly from that block. Never say you're unable to list tasks, lack access to them, or ask what to name a task when the user is asking to see existing tasks rather than create one.
 """
 
 TOOLS = [
@@ -438,6 +439,29 @@ def _should_skip_rag(message: str) -> bool:
     if _KNOWLEDGE_WORDS.search(message):
         return False
     return bool(_MUTATION_START.match(message))
+
+
+_TASK_LISTING_RE = re.compile(
+    r"\b(list|show|view|see|display)\b.{0,20}\btasks?\b"
+    r"|\btasks?\b.{0,25}\b(list|do i have|are there|remain(ing)?|left|pending|available)\b"
+    r"|\bmy tasks?\b"
+    r"|\btask list\b"
+    r"|\bwhat tasks?\b",
+    re.IGNORECASE,
+)
+
+
+def _is_pure_task_listing(message: str) -> bool:
+    """Gemini 2.5 Flash Lite, when offered create_task/update_task/delete_task as
+    function-calling tools, reliably claims it "can't list tasks" for a plain listing
+    request — it over-indexes on tool affordances (no tool literally named "list") and
+    disregards the CURRENT TASKS block already in its context, even with explicit
+    instructions to the contrary right next to that block. Verified: the identical
+    context/system-prompt answers correctly when tools are simply omitted from the
+    request. Same class of documented Gemini function-calling flakiness as the
+    search_vault/list_events single-tool-call shortcuts elsewhere in this file —
+    handled the same way: detect the narrow case and skip chat_with_tools entirely."""
+    return bool(_TASK_LISTING_RE.search(message))
 
 
 def _now() -> str:
@@ -873,7 +897,7 @@ def _serialize_tasks(tasks: list[dict]) -> str:
         return "No active tasks."
     lines = []
     for t in tasks:
-        parts = [f"[{t['id']}] {t['title']}"]
+        parts = [f"[{t['id']}] {t['title']}", f"status:{t['status']}"]
         if t.get("due_date"):
             parts.append(f"due:{t['due_date']}")
         if t.get("priority"):
@@ -1008,11 +1032,14 @@ CURRENT PROJECTS:
             return "Something went wrong on my end. Could you clarify what you meant?"
 
     def chat(self, db, messages: list[dict], client_tz: str | None = None) -> tuple[str, list[dict]]:
+        # Every task regardless of status, not just inbox/active — the chat context
+        # (unlike get_recommendations, which stays scoped to actionable tasks on
+        # purpose) should give the model full visibility so it can answer questions
+        # about done/blocked/archived tasks too, not just what's currently open.
         rows = db.execute("""
             SELECT id, title, status, priority, due_date, fear_level, ambiguity_level, energy_type, project_id, recurring
             FROM tasks
-            WHERE status IN ('inbox', 'active')
-            ORDER BY priority DESC, due_date ASC
+            ORDER BY (status = 'done'), (status = 'archived'), priority DESC, due_date ASC
         """).fetchall()
         tasks = [dict(r) for r in rows]
 
@@ -1042,7 +1069,20 @@ LOCAL CALENDARS:
 {cal_lines}
 
 CURRENT TASKS:
-{task_block}"""
+{task_block}
+
+[The list above is EVERY task regardless of status (inbox, active, done, blocked,
+archived — each shown via status:<value>) — answer any "list/show/what are my
+tasks" question directly from it, including counting or filtering by the fields
+shown. This explicitly includes tasks with status:done and status:archived — if
+asked to list, count, or discuss done or archived tasks specifically, filter the
+list above by status yourself and answer directly; do not claim you lack access
+to done/archived tasks, you have them all right here. When recommending what to
+work on next or summarizing open work (and only then), exclude done/archived
+tasks yourself using the status field — don't wait to be asked.
+There is no separate tool for listing tasks; only call
+create_task/update_task/delete_task when the user wants to create, modify, or
+remove one.]"""
 
         # Passive RAG: retrieve vault context unless this is a pure task mutation.
         # base_system is saved separately so that if a tool call is made in round 1,
@@ -1131,6 +1171,14 @@ CURRENT TASKS:
                     )
             except Exception:
                 logger.exception("Passive RAG retrieval failed")
+
+        # See _is_pure_task_listing's docstring — offering create_task/update_task/
+        # delete_task as tools makes the model reliably refuse a plain listing
+        # request even though the CURRENT TASKS block is already right there in
+        # `system`. Bypass chat_with_tools entirely for this narrow, detected case.
+        if last_user and _is_pure_task_listing(last_user):
+            reply = self.provider.chat(system, messages) or ""
+            return reply, _dedupe_sources(_chunks_to_sources(passive_chunks))
 
         # Agentic loop: keep executing tool calls until the model stops.
         # Cap at 5 rounds to prevent runaway chains.

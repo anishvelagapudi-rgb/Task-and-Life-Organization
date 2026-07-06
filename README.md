@@ -268,7 +268,14 @@ that route's behavior is intentionally changed first.
   tool-calling) and `groq_provider.py` (implemented, not actively used).
 - `service.py` (~1100+ lines) — the core: system prompt, the agentic tool-calling
   loop (up to 5 rounds per message), all calendar-date-resolution logic, task/
-  project/calendar context injected on every call.
+  project/calendar context injected on every call. As of 2026-07-06, the injected
+  `CURRENT TASKS` block includes **every task regardless of status** (inbox,
+  active, done, blocked, archived — each shown via `status:<value>` in
+  `_serialize_tasks`), not just inbox/active — a deliberate token-cost tradeoff so
+  the model can answer questions about completed/archived work too, not just
+  what's currently open. `get_recommendations()` (the separate `/api/ai/recommendations`
+  endpoint) intentionally keeps its own inbox/active-only filter — recommending a
+  done task makes no sense there.
 - **Tools the AI can use:** `create_task`, `update_task`, `delete_task`,
   `create_project`, `delete_project`, `read_document`, `search_vault`, `create_note`,
   `list_events`, `create_event`, `update_event`, `find_connections`. Any new AI tool
@@ -366,6 +373,32 @@ handling so these aren't reintroduced:
   current model and invest in engineering (better deterministic pre-processing,
   verification passes) rather than upgrading to a pricier model — revisit only if
   that effort provably can't close the gap.
+
+### Task listing — a related model quirk, only partially fixed (2026-07-06)
+
+`gemini-2.5-flash-lite`, when offered `create_task`/`update_task`/`delete_task` as
+function-calling tools, reliably refused plain listing requests ("list all my
+tasks") even with the full task list already sitting in its context — it fixates
+on "no tool literally named list" and ignores contradicting instructions and data.
+Verified directly: the identical context/system-prompt answers correctly when
+tools are simply omitted from the request. Fixed for general listing phrasing via
+`_is_pure_task_listing()` in `service.py` — a regex-detected bypass (same pattern
+as the `search_vault`/`list_events` single-tool-call shortcuts) that skips
+`chat_with_tools` entirely and answers with a plain `chat()` call instead.
+
+**Known residual issue, not fixed:** asking specifically about **done** tasks by
+name (e.g. "list my done tasks") still triggers a near-100%-reproducible false
+refusal ("I can only see inbox/active/blocked tasks") — confirmed at 4/4 across
+three escalating prompt rewrites, including one explicitly stating the done task
+is right there in context. Oddly, indirect phrasing about the same data ("how many
+tasks are done?") answers correctly. This is the word "done" specifically
+triggering something in the model, not a tools-vs-no-tools question like the
+general case above — a deeper model-capability ceiling in the same family as the
+calendar issue, not a logic bug. **Decision: leave as a known quirk for now.** A
+more robust fix would pre-filter the task list in Python by status when the
+message names one (deterministic, bypasses the model's status-reasoning
+entirely) rather than relying on prompt wording — revisit if this proves
+disruptive in practice.
 
 ---
 
