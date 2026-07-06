@@ -1366,11 +1366,15 @@ def _start_rag():
 if __name__ == "__main__":
     import threading
     init_db(app)
+    # Debug mode is opt-in (off by default) since Werkzeug's debugger allows
+    # remote code execution if an unhandled exception is ever reachable from
+    # outside localhost. Set FLASK_DEBUG=true for local development only.
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     # With debug=True, Werkzeug's reloader re-execs this whole module in a child
     # process (WERKZEUG_RUN_MAIN=true there) and keeps the original as a stub
     # watching for restarts. Without this guard, both processes ran their own
     # indexer + vault watcher, racing to write the same ChromaDB store on every
     # file change.
-    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         threading.Thread(target=_start_rag, daemon=True).start()
-    app.run(debug=True)
+    app.run(debug=debug)
