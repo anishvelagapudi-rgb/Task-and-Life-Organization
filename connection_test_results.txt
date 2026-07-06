@@ -1,4 +1,4 @@
-CONNECTION ENGINE TEST RESULTS — 2026-07-04 19:29:39
+CONNECTION ENGINE TEST RESULTS — 2026-07-06 00:18:52
 ========================================================================
 
 
@@ -22,7 +22,7 @@ CONNECTION ENGINE TEST RESULTS — 2026-07-04 19:29:39
 
 ── Cleanup ───────────────────────────────────────────────────────────────
 
-  Removed 3 test file(s) from vault/ChromaDB, and their note_connections rows.
+  Removed 5 test file(s) from vault Storage/vector store, and their note_connections rows.
 
 ════════════════════════════════════════════════════════════════════════
 DETAILED RESULTS
@@ -33,19 +33,19 @@ DETAILED RESULTS
   Result      : 6/6 correct
   Explanation : Non-obvious = moderate cross-folder overlap: not near-duplicate, not noise, never same-folder. All cases correct.
 
-✓ [PASS]  #02  note_connections — SQLite save/read round-trip, upsert not duplicate
+✓ [PASS]  #02  note_connections — Postgres save/read round-trip, upsert not duplicate
   Metric      : save_connections() then get_saved_connections() returns the same data; re-saving doesn't duplicate
   Result      : Read back: [Connection(source_path='journal/_conn_test_a.md', target_path='projects/_conn_test_b.md', summary='test summary', score=0.25)]  |  No duplicate after re-save: True
-  Explanation : Connections are cached in their own SQLite table (not a new ChromaDB collection — see CONNECTION_ENGINE_DESIGN.md). Round-trip correct, upsert working.
+  Explanation : Connections are cached in their own Postgres table (not a new vector-store collection — see CONNECTION_ENGINE_DESIGN.md). Round-trip correct, upsert working.
 
 ✓ [PASS]  #03  discover_connections — finds a real cross-folder connection
   Metric      : A deliberately-related note in a different folder (journal vs projects) should surface; same-folder notes never should
-  Result      : Targets found: ['projects/_conn_test_deadline.md', 'reference/catalog-unc-edu-undergraduate-programs-study-computer-science-major-bs.html', 'reference/college_planning_-_overall_completed.md']
-  Explanation : Two notes about the same underlying CS101 deadline stress, written in different vault folders, should be surfaced as a non-obvious connection. Found it (targets: ['projects/_conn_test_deadline.md', 'reference/catalog-unc-edu-undergraduate-programs-study-computer-science-major-bs.html', 'reference/college_planning_-_overall_completed.md']).
+  Result      : Targets found: ['projects/_conn_test_deadline.md']
+  Explanation : Two notes about the same underlying CS101 deadline stress, written in different vault folders, should be surfaced as a non-obvious connection. Found it (targets: ['projects/_conn_test_deadline.md']).
 
 ✓ [PASS]  #04  discover_connections — unrelated note does not appear
   Metric      : A substantive, topically-unrelated note (sourdough troubleshooting) should not be surfaced as a connection to a deadline-anxiety journal entry
-  Result      : Targets found: ['projects/_conn_test_deadline.md', 'reference/catalog-unc-edu-undergraduate-programs-study-computer-science-major-bs.html', 'reference/college_planning_-_overall_completed.md']
+  Result      : Targets found: ['projects/_conn_test_deadline.md']
   Explanation : The distance-band filter should keep genuinely unrelated content out. Correct — sourdough note absent.
 
 ✓ [PASS]  #05  delete_connections_for — cleans up rows for a deleted/moved note
@@ -55,11 +55,11 @@ DETAILED RESULTS
 
 ✓ [PASS]  #06  find_connections AI tool — active connection discovery via chat
   Metric      : Asking the AI to find connections for the journal note should surface the projects note
-  Result      : Sources: [{'source': 'projects/_conn_test_deadline.md', 'heading': ''}, {'source': 'reference/catalog-unc-edu-undergraduate-programs-study-computer-science-major-bs.html', 'heading': ''}, {'source': 'reference/college_planning_-_overall_completed.md', 'heading': ''}]
+  Result      : Sources: [{'source': 'projects/_conn_test_deadline.md', 'heading': ''}]
 Full reply:
-- Semantically related to projects/_conn_test_deadline.md, despite living in a different vault section (journal vs projects) — shared terms: need, small.
-- Semantically related to reference/catalog-unc-edu-undergraduate-programs-study-computer-science-major-bs.html, despite living in a different vault section (journal vs reference) — shared terms: project.
-- Semantically related to reference/college_planning_-_overall_completed.md, despite living in a different vault section (journal vs reference).
+Here are some non-obvious connections for `journal/_conn_test_stress.md`:
+
+→ `projects/_conn_test_deadline.md`: Semantically related to `journal/_conn_test_stress.md`, despite living in a different vault section (journal vs projects) — shared terms: need, small.
   Explanation : Asking the AI to find connections should trigger the find_connections tool, which calls discover_connections() and surfaces the cross-folder projects note either in the reply text or the returned sources list. Tool surfaced the expected note.
 
 ════════════════════════════════════════════════════════════════════════

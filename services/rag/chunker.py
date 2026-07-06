@@ -1,3 +1,4 @@
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,8 +20,8 @@ class Chunk:
     reviewed: bool = True
 
 
-def _parse_file(path: str) -> tuple[dict, str]:
-    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+def _parse_file(data: bytes) -> tuple[dict, str]:
+    raw = data.decode("utf-8", errors="replace")
     try:
         import frontmatter
         post = frontmatter.loads(raw)
@@ -29,16 +30,16 @@ def _parse_file(path: str) -> tuple[dict, str]:
         return {}, raw
 
 
-def _extract_pdf(path: str) -> tuple[dict, str]:
+def _extract_pdf(data: bytes) -> tuple[dict, str]:
     from pypdf import PdfReader
-    reader = PdfReader(path)
+    reader = PdfReader(io.BytesIO(data))
     pages = [page.extract_text() or "" for page in reader.pages]
     return {}, "\n\n".join(p.strip() for p in pages if p.strip())
 
 
-def _extract_html(path: str) -> tuple[dict, str]:
+def _extract_html(data: bytes) -> tuple[dict, str]:
     from bs4 import BeautifulSoup
-    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    raw = data.decode("utf-8", errors="replace")
     soup = BeautifulSoup(raw, "html.parser")
     for tag in soup.find_all(["h1", "h2", "h3"]):
         level = int(tag.name[1])
@@ -46,9 +47,9 @@ def _extract_html(path: str) -> tuple[dict, str]:
     return {}, soup.get_text(separator="\n", strip=True)
 
 
-def _extract_docx(path: str) -> tuple[dict, str]:
+def _extract_docx(data: bytes) -> tuple[dict, str]:
     from docx import Document
-    doc = Document(path)
+    doc = Document(io.BytesIO(data))
     parts = []
     for para in doc.paragraphs:
         if not para.text.strip():
@@ -64,17 +65,17 @@ def _extract_docx(path: str) -> tuple[dict, str]:
     return {}, "\n\n".join(parts)
 
 
-def _extract_text(path: str) -> tuple[dict, str]:
-    ext = Path(path).suffix.lower()
+def _extract_text(data: bytes, source_path: str) -> tuple[dict, str]:
+    ext = Path(source_path).suffix.lower()
     if ext == ".md":
-        return _parse_file(path)
+        return _parse_file(data)
     if ext == ".pdf":
-        return _extract_pdf(path)
+        return _extract_pdf(data)
     if ext in (".html", ".htm"):
-        return _extract_html(path)
+        return _extract_html(data)
     if ext == ".docx":
-        return _extract_docx(path)
-    return {}, Path(path).read_text(encoding="utf-8", errors="replace")
+        return _extract_docx(data)
+    return {}, data.decode("utf-8", errors="replace")
 
 
 def _split_by_headings(text: str) -> list[tuple[str, str]]:
@@ -113,8 +114,8 @@ def _split_paragraphs(text: str, max_chars: int) -> list[str]:
     return chunks or [text[:max_chars]]
 
 
-def chunk_file(path: str, collection: str) -> list[Chunk]:
-    meta, content = _extract_text(path)
+def chunk_bytes(data: bytes, source_path: str, collection: str) -> list[Chunk]:
+    meta, content = _extract_text(data, source_path)
     tags = meta.get("tags") or []
     if not isinstance(tags, list):
         tags = [str(tags)]
@@ -131,7 +132,7 @@ def chunk_file(path: str, collection: str) -> list[Chunk]:
             if piece.strip():
                 chunks.append(Chunk(
                     text=piece,
-                    source_path=path,
+                    source_path=source_path,
                     collection=collection,
                     heading=heading,
                     tags=tags,

@@ -95,9 +95,9 @@ def seed():
     init_db(app)
     with app.app_context():
         db = get_db()
-        count = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        count = db.execute("SELECT COUNT(*) AS count FROM tasks").fetchone()["count"]
         if count > 0:
-            print(f"DB already has {count} tasks. Delete dev.db first if you want a clean seed.")
+            print(f"DB already has {count} tasks. Truncate the tasks table first if you want a clean seed.")
             return
 
         # id_by_title lets us look up the auto-assigned DB id of any inserted task

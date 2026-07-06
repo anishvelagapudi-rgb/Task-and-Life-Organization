@@ -10,7 +10,6 @@ retriever's default "search every collection" behavior — see the design doc).
 
 import hashlib
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,11 +17,9 @@ from pathlib import Path
 
 from services.rag.embedder import embed_query
 from services.rag.store import list_collections, query_collection
+from services.vault import storage
 
 logger = logging.getLogger(__name__)
-
-_HERE = os.path.dirname(__file__)
-VAULT_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "data", "vault"))
 
 # The standard retriever caps confident matches at distance <= 0.3. This engine
 # deliberately looks in a different, looser band — too close is "obviously the same
@@ -72,11 +69,10 @@ def _note_text(note_path: str) -> str | None:
     other formats are skipped gracefully (empty result, not an error)."""
     if not note_path.endswith(".md"):
         return None
-    vault_root = os.path.realpath(VAULT_ROOT)
-    abs_path = os.path.realpath(os.path.join(vault_root, note_path))
-    if not abs_path.startswith(vault_root + os.sep) or not os.path.isfile(abs_path):
+    try:
+        raw = storage.download(note_path).decode("utf-8", errors="replace")
+    except FileNotFoundError:
         return None
-    raw = Path(abs_path).read_text(encoding="utf-8", errors="replace")
     try:
         import frontmatter as fm
         text = fm.loads(raw).content.strip()
@@ -100,15 +96,6 @@ def _passes_filter(distance: float, source_collection: str, target_collection: s
     return MIN_DISTANCE <= distance <= MAX_DISTANCE
 
 
-def _strip_vault_prefix(path: str) -> str:
-    vault_root = os.path.realpath(VAULT_ROOT)
-    if "/data/vault/" in path:
-        return path.split("/data/vault/", 1)[1]
-    if path.startswith(vault_root):
-        return os.path.relpath(path, vault_root)
-    return path
-
-
 def _summarize(source_path: str, source_collection: str, target_collection: str,
                source_text: str, target_text: str) -> str:
     shared = sorted(_keywords(source_text) & _keywords(target_text))[:5]
@@ -126,8 +113,6 @@ def discover_connections(note_path: str, k: int = 5, db=None) -> list["Connectio
     `db` is given, results are also upserted into note_connections as a best-effort
     cache/log, but that's not required for this function's own correctness."""
     note_path = note_path.lstrip("/")
-    vault_root = os.path.realpath(VAULT_ROOT)
-    note_abs = os.path.realpath(os.path.join(vault_root, note_path))
 
     source_text = _note_text(note_path)
     if not source_text:
@@ -149,11 +134,8 @@ def discover_connections(note_path: str, k: int = 5, db=None) -> list["Connectio
 
     best_per_target = {}
     for c in candidates:
-        try:
-            if os.path.realpath(c.source_path) == note_abs:
-                continue
-        except Exception:
-            pass
+        if c.source_path == note_path:
+            continue
         if not _passes_filter(c.distance, source_collection, c.collection):
             continue
         existing = best_per_target.get(c.source_path)
@@ -164,11 +146,10 @@ def discover_connections(note_path: str, k: int = 5, db=None) -> list["Connectio
 
     connections = []
     for c in ranked:
-        target_rel = _strip_vault_prefix(c.source_path)
         summary = _summarize(note_path, source_collection, c.collection, source_text, c.text)
         connections.append(Connection(
             source_path=note_path,
-            target_path=target_rel,
+            target_path=c.source_path,
             summary=summary,
             score=c.distance,
         ))
@@ -193,10 +174,18 @@ def save_connections(db, connections: list["Connection"], source_collection: str
     now = datetime.now(timezone.utc).isoformat()
     for c in connections:
         db.execute(
-            """INSERT OR REPLACE INTO note_connections
+            """INSERT INTO note_connections
                (id, source_path, target_path, source_collection, target_collection,
                 distance, summary, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   source_path = EXCLUDED.source_path,
+                   target_path = EXCLUDED.target_path,
+                   source_collection = EXCLUDED.source_collection,
+                   target_collection = EXCLUDED.target_collection,
+                   distance = EXCLUDED.distance,
+                   summary = EXCLUDED.summary,
+                   created_at = EXCLUDED.created_at""",
             (
                 _connection_id(c.source_path, c.target_path),
                 c.source_path, c.target_path,

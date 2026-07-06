@@ -7,13 +7,14 @@ The markdown always includes frontmatter with upload provenance metadata.
 
 import csv
 import io
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import frontmatter
 from werkzeug.utils import secure_filename
+
+from services.vault import storage
 
 ALLOWED_EXTENSIONS = {".md", ".txt", ".pdf", ".html", ".htm", ".csv", ".docx"}
 
@@ -134,10 +135,10 @@ _CONVERTERS = {
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
-def save_upload(file_storage, target_folder: str, vault_root: str) -> str:
+def save_upload(file_storage, target_folder: str) -> str:
     """
-    Convert an uploaded FileStorage object to markdown and save it in
-    vault_root/target_folder/. Returns the absolute path of the saved file.
+    Convert an uploaded FileStorage object to markdown and save it in the vault
+    Storage bucket under target_folder/. Returns the storage key of the saved file.
 
     Raises ValueError for unsupported file types.
     """
@@ -155,15 +156,11 @@ def save_upload(file_storage, target_folder: str, vault_root: str) -> str:
     md_content = converter(data, original)
 
     slug = _slugify(original)
-    folder_path = os.path.join(vault_root, target_folder)
-    os.makedirs(folder_path, exist_ok=True)
-
-    out_path = os.path.join(folder_path, slug + ".md")
-    if os.path.exists(out_path):
+    key = f"{target_folder}/{slug}.md"
+    if storage.exists(key):
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        out_path = os.path.join(folder_path, f"{slug}-{ts}.md")
+        key = f"{target_folder}/{slug}-{ts}.md"
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
+    storage.upload(key, md_content.encode("utf-8"), content_type="text/markdown")
 
-    return out_path
+    return key

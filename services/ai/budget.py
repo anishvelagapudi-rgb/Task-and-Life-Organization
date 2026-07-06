@@ -13,17 +13,18 @@ HOW IT WORKS:
   gemini_provider.py sums prompt_token_count + tool_use_prompt_token_count into
   input_tokens, and candidates_token_count + thoughts_token_count into output_tokens,
   then passes both here via record_usage(). We multiply by the per-token dollar rates
-  to get the cost of that call, append it with a timestamp to a rolling deque, and
+  to get the cost of that call, insert a row into the ai_usage_log Postgres table, and
   raise BudgetExceededError if the sum of costs in the last 60 minutes exceeds the limit.
 
   Once the rolling window slides past old entries, the budget automatically recovers —
   no server restart needed. The limit applies to all API calls combined (generative
   AND embedding).
 
-  The rolling window itself lives only in this in-memory deque — nothing is persisted
-  to disk (costs.log is a write-only audit trail, never read back on startup). So a
-  server restart always clears accumulated spend, by construction, not as a feature
-  that could silently regress.
+  The rolling window is backed by the ai_usage_log Postgres table (not an in-memory
+  deque) specifically so the cap holds across multiple serverless instances — an
+  in-memory version would give every cold-started instance its own independent
+  budget, silently multiplying the effective limit. costs.log remains a write-only
+  local audit trail alongside it, never read back.
 
 PRICING (verify at https://ai.google.dev/pricing, rates below may be wrong):
   Gemini 2.5 Flash Lite — Input:  $0.10 / 1M tokens  ← unconfirmed
@@ -36,20 +37,15 @@ HOURLY_LIMIT defaults to $0.15 but can be overridden via AI_HOURLY_BUDGET in .en
 
 import logging
 import os
-import time
-from collections import deque
 from logging.handlers import RotatingFileHandler
 
-_WINDOW_SECONDS = 3600  # 1 hour rolling window
+import psycopg2
 
 HOURLY_LIMIT: float = float(os.environ.get("AI_HOURLY_BUDGET", "0.15"))
 
 _INPUT_RATE  = 0.10  / 1_000_000
 _OUTPUT_RATE = 0.40  / 1_000_000
 _EMBED_RATE  = 0.025 / 1_000_000
-
-# Deque of (timestamp, cost) tuples — old entries fall off naturally
-_call_log: deque = deque()
 
 _handler = RotatingFileHandler("costs.log", maxBytes=1_000_000, backupCount=3)
 _handler.setFormatter(logging.Formatter(
@@ -59,6 +55,19 @@ _cost_log = logging.getLogger("ai.cost")
 _cost_log.setLevel(logging.INFO)
 _cost_log.addHandler(_handler)
 
+# Own lazily-created connection, independent of Flask's g-scoped one — embedder.py
+# and gemini_provider.py call check()/record_usage() from contexts that may not
+# have a Flask app/request context (e.g. standalone scripts, indexer.index_all()).
+_conn = None
+
+
+def _get_conn():
+    global _conn
+    if _conn is None or _conn.closed:
+        _conn = psycopg2.connect(os.environ["DATABASE_URL"])
+        _conn.autocommit = True
+    return _conn
+
 
 class BudgetExceededError(RuntimeError):
     pass
@@ -66,15 +75,18 @@ class BudgetExceededError(RuntimeError):
 
 def _hourly_cost() -> float:
     """Sum of all call costs within the last 60 minutes."""
-    cutoff = time.time() - _WINDOW_SECONDS
-    return sum(cost for ts, cost in _call_log if ts >= cutoff)
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT COALESCE(SUM(cost), 0) FROM ai_usage_log WHERE ts >= now() - interval '1 hour'")
+        return float(cur.fetchone()[0])
 
 
 def _trim() -> None:
-    """Drop entries older than the rolling window to keep the deque bounded."""
-    cutoff = time.time() - _WINDOW_SECONDS
-    while _call_log and _call_log[0][0] < cutoff:
-        _call_log.popleft()
+    """Drop entries older than 24h — a housekeeping pass, not the rolling-window
+    boundary itself (that's the `ts >= now() - interval '1 hour'` filter in
+    _hourly_cost()). Keeping a day of history costs nothing at this scale and
+    leaves room for a future stats/debug view."""
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM ai_usage_log WHERE ts < now() - interval '24 hours'")
 
 
 def check() -> None:
@@ -101,7 +113,11 @@ def record_usage(input_tokens: int, output_tokens: int, model: str) -> float:
     _trim()
 
     call_cost = input_tokens * _INPUT_RATE + output_tokens * _OUTPUT_RATE
-    _call_log.append((time.time(), call_cost))
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_usage_log (cost, kind, model) VALUES (%s, 'generation', %s)",
+            (call_cost, model),
+        )
     hourly = _hourly_cost()
 
     _cost_log.info(
@@ -128,7 +144,11 @@ def record_embedding_usage(char_count: int, model: str) -> float:
 
     estimated_tokens = max(1, char_count // 4)
     call_cost = estimated_tokens * _EMBED_RATE
-    _call_log.append((time.time(), call_cost))
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_usage_log (cost, kind, model) VALUES (%s, 'embedding', %s)",
+            (call_cost, model),
+        )
     hourly = _hourly_cost()
 
     _cost_log.info(

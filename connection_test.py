@@ -14,7 +14,8 @@ pipeline standalone.
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, sys, sqlite3, textwrap
+import os, sys, textwrap
+import psycopg2
 from datetime import datetime
 from pathlib import Path
 
@@ -59,8 +60,6 @@ def report_all():
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-VAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vault")
-
 JOURNAL_NOTE = textwrap.dedent("""\
     ---
     title: Feeling overwhelmed this week
@@ -92,36 +91,40 @@ PROJECT_NOTE = textwrap.dedent("""\
 _TEST_FILES: list[str] = []
 
 def write_test_note(folder, filename, content):
-    path = os.path.join(VAULT_ROOT, folder, filename)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(content)
-    _TEST_FILES.append(os.path.abspath(path))
-    return os.path.abspath(path)
+    from services.vault import storage
+    key = f"{folder}/{filename}"
+    storage.upload(key, content.encode("utf-8"), content_type="text/markdown")
+    _TEST_FILES.append(key)
+    return key
 
 def cleanup(db):
     from services.rag.store import delete_by_source
+    from services.vault import storage
     removed = 0
-    for path in _TEST_FILES:
-        folder = Path(path).relative_to(VAULT_ROOT).parts[0]
+    for key in _TEST_FILES:
+        folder = key.split("/", 1)[0]
         try:
-            delete_by_source(folder, path)
+            delete_by_source(folder, key)
         except Exception:
             pass
-        if os.path.exists(path):
-            os.remove(path)
+        try:
+            storage.delete(key)
             removed += 1
+        except Exception:
+            pass
     try:
         db.execute("DELETE FROM note_connections WHERE source_path LIKE '%_conn_test%'")
         db.commit()
     except Exception:
         pass
-    w(f"\n  Removed {removed} test file(s) from vault/ChromaDB, and their note_connections rows.")
+    w(f"\n  Removed {removed} test file(s) from vault Storage/vector store, and their note_connections rows.")
 
 def get_db():
-    db = sqlite3.connect("dev.db")
-    db.row_factory = sqlite3.Row
-    return db
+    # Reuse db.py's _PGConnection wrapper (gives .execute() with ?->%s rewriting
+    # and RealDictCursor rows) directly, bypassing get_db()'s Flask g-context
+    # dependency — this script runs with no Flask app/request context.
+    from db import _PGConnection
+    return _PGConnection(psycopg2.connect(os.environ["DATABASE_URL"]))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -177,12 +180,12 @@ def test_note_connections_sqlite_roundtrip():
     db.commit()
     db.close()
     record(
-        name="note_connections — SQLite save/read round-trip, upsert not duplicate",
+        name="note_connections — Postgres save/read round-trip, upsert not duplicate",
         metric="save_connections() then get_saved_connections() returns the same data; re-saving doesn't duplicate",
         result=f"Read back: {read_back}  |  No duplicate after re-save: {no_dup}",
         passed=passed and no_dup,
         explanation=(
-            "Connections are cached in their own SQLite table (not a new ChromaDB collection — "
+            "Connections are cached in their own Postgres table (not a new vector-store collection — "
             "see CONNECTION_ENGINE_DESIGN.md). " + ("Round-trip correct, upsert working." if passed and no_dup
                else "Round-trip or upsert semantics broken.")
         ),

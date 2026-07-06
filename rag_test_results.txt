@@ -1,4 +1,4 @@
-RAG TEST RESULTS — 2026-07-04 19:29:17
+RAG TEST RESULTS — 2026-07-06 00:17:44
 ========================================================================
 
 
@@ -48,7 +48,7 @@ RAG TEST RESULTS — 2026-07-04 19:29:17
 
 ── Cleanup ───────────────────────────────────────────────────────────────
 
-  Removed 4 test file(s) from vault and ChromaDB.
+  Removed 4 test file(s) from vault Storage and the vector store.
 
 ════════════════════════════════════════════════════════════════════════
 DETAILED RESULTS
@@ -77,17 +77,17 @@ DETAILED RESULTS
 ✓ [PASS]  #05  Indexer — index_file() completes without error
   Metric      : index_file() called on a valid .md file
   Result      : Success
-  Explanation : index_file() should chunk the file, embed it, and write to ChromaDB. Completed cleanly.
+  Explanation : index_file() should chunk the file, embed it, and write to the vector store. Completed cleanly.
 
 ✓ [PASS]  #06  Indexer — re-indexing same file is idempotent (no duplicates)
   Metric      : Chunk count for source_path after 1st index == count after 2nd index
   Result      : After 1st index: 2 chunk(s)  |  After 2nd index: 2 chunk(s)
-  Explanation : The file watcher fires on every save, so indexing must be safe to call repeatedly. upsert() with stable IDs (md5(path)_N) should overwrite, not accumulate. Chunk count stable — upsert working correctly.
+  Explanation : Every vault write path reindexes explicitly after writing, so indexing must be safe to call repeatedly. upsert() with stable IDs (md5(path)_N) should overwrite, not accumulate. Chunk count stable — upsert working correctly.
 
 ✓ [PASS]  #07  Indexer — delete_by_source removes chunks from retrieval
   Metric      : Note retrievable before deletion, absent after deletion
   Result      : Found before: True  |  Found after: False
-  Explanation : Deleting a vault file should remove its chunks from ChromaDB so stale content is never returned. Deletion confirmed — note no longer retrievable.
+  Explanation : Deleting a vault file should remove its chunks from the vector store so stale content is never returned. Deletion confirmed — note no longer retrievable.
 
 ✓ [PASS]  #08  Retrieval — relevant query surfaces correct note
   Metric      : Does '_test_qcd.md' appear in top-5 results for a matching query?
@@ -107,7 +107,7 @@ DETAILED RESULTS
 ✓ [PASS]  #11  Retrieval — cross-collection (person note found)
   Metric      : Does a query about an advisor surface the people/ collection note?
   Result      : Top sources: ['_test_person.md']
-  Explanation : Retrieval searches all ChromaDB collections by default, not just 'classes'. People note surfaced correctly.
+  Explanation : Retrieval searches all vector store collections by default, not just 'classes'. People note surfaced correctly.
 
 ✓ [PASS]  #12  Retrieval — scoped to single collection
   Metric      : When collections=['classes'] is passed, do all results come from 'classes'?
@@ -135,7 +135,7 @@ DETAILED RESULTS
 Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}, {'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}]
 Inline citation present (should be False): False
 Full reply:
-Quantum chromodynamics (QCD) is the theory of the strong nuclear force. Quarks carry color charge, which can be red, green, or blue. Gluons are the force carriers of the strong interaction. Color confinement means that quarks cannot exist in isolation; only color-neutral combinations form hadrons like protons and neutrons.
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force. Quarks are fundamental particles that carry color charge, which can be red, green, or blue. They are the constituents of hadrons, like protons and neutrons, and cannot exist in isolation due to color confinement. Gluons are the force carriers responsible for the strong interaction between quarks.
   Explanation : The QCD note should be retrieved and used, with its source surfaced in the separate `sources` list returned alongside the reply — not named inline in the answer text. Correct on all three counts.
 
 ✓ [PASS]  #17  (GK) fallback — AI labels general knowledge answers
@@ -143,7 +143,7 @@ Quantum chromodynamics (QCD) is the theory of the strong nuclear force. Quarks c
   Result      : (GK) present: True
 Sources: []
 Full reply:
-The boiling point of tungsten is 5930°C. (GK)
+The boiling point of tungsten is 5930 °C. (GK)
 
 Want me to search your vault for anything related?
   Explanation : When answering from general knowledge (nothing in vault), the AI must append '(GK)'. Correct — (GK) marker present.
@@ -153,18 +153,33 @@ Want me to search your vault for anything related?
   Result      : Terms found: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics']
 Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}, {'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}]
 Full reply:
-Color confinement is a principle in quantum chromodynamics (QCD) stating that quarks, which carry color charge (red, green, or blue), cannot be isolated. They can only form color-neutral combinations, such as protons and neutrons. Gluons are the force carriers of this strong interaction. (GK)
+[1] classes/_test_qcd.md § # Color Confinement
+# Color Confinement
 
-Want me to search your vault for anything related?
-  Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries ChromaDB and returns chunks. Tool returned vault content — terms: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics'].
+…Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+
+Color confinement means quarks cannot exist in isolation — only
+color-neutral combinations form hadrons such as protons and neutrons.
+---
+
+[2] classes/_test_qcd.md § # Quarks and Gluons
+# Quarks and Gluons
+
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+---
+  Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries the vector store and returns chunks. Tool returned vault content — terms: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics'].
 
 ✓ [PASS]  #19  create_note tool — AI writes a file to vault/ai_generated/
   Metric      : File created + has reviewed:false + has ai_generated:true in frontmatter
-  Result      : New files: {'rag-pipeline-overview-20260704232934.md'}
+  Result      : New files: {'ai_generated/rag-pipeline-overview.md'}
 reviewed:false present: True
 ai_generated:true present: True
 AI reply:
-Saved note "RAG Pipeline Overview".
+I've saved a note titled 'RAG Pipeline Overview' about RAG pipelines.
   Explanation : The AI should call create_note, which writes a .md file with safety frontmatter. File created correctly with proper flags.
 
 ════════════════════════════════════════════════════════════════════════

@@ -8,7 +8,7 @@
 const BASE = "http://localhost:5000";
 
 // Paste your actual API key here before running.
-const API_KEY = "R!<%R19%)v!4*Es4Dn_7`@CP|r[.%X|xQI(Po@I{zC)7'-ZR";
+const API_KEY = "q6eS=z6\"}8XIka>KNBmZ3EP[o9<cBY~6tza;KdnS|eKgJ$Po";
 
 // ─── helper ───────────────────────────────────────────────────────────────────
 

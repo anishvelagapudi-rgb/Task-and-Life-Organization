@@ -592,16 +592,16 @@ def _execute_tool(db, name: str, args: dict) -> dict:
     if name == "read_document":
         try:
             from services.rag.chunker import _extract_text
-            from services.rag.indexer import VAULT_ROOT
+            from services.vault import storage
 
             rel = args["path"].lstrip("/")
-            abs_path = os.path.realpath(os.path.join(VAULT_ROOT, rel))
-            vault_root = os.path.realpath(VAULT_ROOT)
-            if not abs_path.startswith(vault_root + os.sep):
+            if ".." in rel.split("/"):
                 return {"found": False, "error": "Path is outside the vault"}
-            if not os.path.exists(abs_path):
+            try:
+                data = storage.download(rel)
+            except FileNotFoundError:
                 return {"found": False, "error": f"File not found: {args['path']}"}
-            _, content = _extract_text(abs_path)
+            _, content = _extract_text(data, rel)
             return {"found": True, "path": args["path"], "content": content}
         except Exception as e:
             logger.exception("read_document tool failed")
@@ -621,9 +621,7 @@ def _execute_tool(db, name: str, args: dict) -> dict:
                 "found": True,
                 "chunks": [
                     {
-                        "source": c.source_path.split("/data/vault/", 1)[-1]
-                        if "/data/vault/" in c.source_path
-                        else c.source_path,
+                        "source": c.source_path,
                         "collection": c.collection,
                         "heading": c.heading,
                         "text": c.text[:1200],
@@ -638,7 +636,8 @@ def _execute_tool(db, name: str, args: dict) -> dict:
     if name == "create_note":
         try:
             import frontmatter as fm
-            from services.rag.indexer import VAULT_ROOT, index_file
+            from services.vault import storage
+            from services.rag.indexer import index_file
 
             slug = re.sub(r"[^\w\-]", "-", args["filename"].lower().strip()).strip("-")
             if not slug:
@@ -647,11 +646,11 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             # AI-generated notes live in their own folder, always flagged unreviewed —
             # never treated as ground truth by retrieval or the user (see CLAUDE.md's
             # vault convention). Must not land in inbox/ alongside the user's own notes.
-            path = os.path.join(VAULT_ROOT, "ai_generated", filename)
+            key = f"ai_generated/{filename}"
 
-            if os.path.exists(path):
+            if storage.exists(key):
                 ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                path = os.path.join(VAULT_ROOT, "ai_generated", f"{slug}-{ts}.md")
+                key = f"ai_generated/{slug}-{ts}.md"
 
             meta = {
                 "title": args["title"],
@@ -663,18 +662,15 @@ def _execute_tool(db, name: str, args: dict) -> dict:
                 "updated_at": _now(),
             }
             post = fm.Post(args["content"], **meta)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(fm.dumps(post))
+            storage.upload(key, fm.dumps(post).encode("utf-8"), content_type="text/markdown")
 
             # Index immediately so it's searchable in this same session
             try:
-                index_file(path)
+                index_file(key)
             except Exception:
-                logger.warning("Immediate index of created note failed; watcher will retry")
+                logger.warning("Immediate index of created note failed")
 
-            rel = path.split("/data/vault/", 1)[-1] if "/data/vault/" in path else path
-            return {"success": True, "path": rel}
+            return {"success": True, "path": key}
         except Exception as e:
             logger.exception("create_note tool failed")
             return {"success": False, "error": str(e)}

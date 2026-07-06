@@ -1,14 +1,61 @@
+import os
 import re
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import g
 
-DATABASE = "dev.db"
+_PLACEHOLDER_RE = re.compile(r"\?")
+
+
+class _PGCursor:
+    """Wraps a psycopg2 cursor so `.execute()` also rewrites `?`->`%s` — needed
+    because classes/Task.py and classes/Project.py call conn.cursor() directly
+    rather than going through _PGConnection.execute()."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def execute(self, sql, params=()):
+        self._cur.execute(_PLACEHOLDER_RE.sub("%s", sql), params)
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class _PGConnection:
+    """Thin wrapper giving a psycopg2 connection the sqlite3.Connection.execute()
+    convenience method (psycopg2 only exposes it on cursors), rewriting the
+    codebase's sqlite-style `?` placeholders to psycopg2's `%s`, and defaulting to
+    RealDictCursor so `row["col"]`/`dict(row)` call sites keep working unchanged.
+    Not autocommit — callers already call db.commit() explicitly everywhere, matching
+    sqlite3's default (also non-autocommit) behavior."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(_PLACEHOLDER_RE.sub("%s", sql), params)
+        return cur
+
+    def cursor(self, **kwargs):
+        kwargs.setdefault("cursor_factory", RealDictCursor)
+        return _PGCursor(self._conn.cursor(**kwargs))
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
+        g.db = _PGConnection(psycopg2.connect(os.environ["DATABASE_URL"]))
     return g.db
 
 
@@ -43,206 +90,12 @@ def enforce_recurring_invariant(fields: dict, existing_recurring: str | None = N
         fields["due_date"] = None
 
 
-def _table_exists(db, name: str) -> bool:
-    return db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone() is not None
-
-
-def _columns(db, table: str) -> set[str]:
-    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _id_column_type(db, table: str) -> str | None:
-    for row in db.execute(f"PRAGMA table_info({table})").fetchall():
-        if row[1] == "id":
-            return row[2]  # e.g. 'INTEGER' or 'TEXT'
-    return None
-
-
-def _migrate_legacy_schema(db) -> tuple[bool, bool]:
-    """
-    One-time migration for `tasks`/`projects` tables created before this project's
-    switch to TEXT (UUID) ids. `CREATE TABLE IF NOT EXISTS` is a no-op against an
-    already-existing table, so a `dev.db` created under the old schema (INTEGER
-    PRIMARY KEY AUTOINCREMENT ids, and `tasks` missing tags/dependencies/task_notes)
-    never picks up the new schema on its own — and classes/Task.py + classes/Project.py
-    generate string UUIDs as ids, which raises `IntegrityError: datatype mismatch`
-    against an INTEGER PRIMARY KEY column. Detected here and fixed forward.
-
-    Renames the old table aside; the CREATE TABLE IF NOT EXISTS block that runs right
-    after this builds the correct new table fresh. Data is copied back in by
-    _finish_legacy_migration() once the new table exists, with every id-shaped column
-    CAST to TEXT so relationships (tasks.project_id -> projects.id,
-    tasks.parent_task_id -> tasks.id) stay consistent under the new affinity — SQLite
-    treats TEXT '5' and INTEGER 5 as unequal, so casting must be uniform.
-
-    Idempotent: once a table is on the new schema this is a no-op, safe on every boot.
-    """
-    migrate_projects = _table_exists(db, "projects") and (
-        (_id_column_type(db, "projects") or "").upper() == "INTEGER"
-    )
-    migrate_tasks = _table_exists(db, "tasks") and (
-        "tags" not in _columns(db, "tasks")
-        or (_id_column_type(db, "tasks") or "").upper() == "INTEGER"
-    )
-    if migrate_projects:
-        db.execute("ALTER TABLE projects RENAME TO projects_legacy")
-    if migrate_tasks:
-        db.execute("ALTER TABLE tasks RENAME TO tasks_legacy")
-    return migrate_projects, migrate_tasks
-
-
-def _finish_legacy_migration(db, migrate_projects: bool, migrate_tasks: bool) -> None:
-    """Copies rows from the renamed-aside legacy tables into the freshly created
-    new-schema tables, then drops the legacy tables. Must run after the
-    CREATE TABLE IF NOT EXISTS block so the destination tables exist."""
-    if migrate_projects:
-        db.execute("""
-            INSERT INTO projects (id, title, description, status, progress, created_at, updated_at)
-            SELECT CAST(id AS TEXT), title, description, status, progress, created_at, updated_at
-            FROM projects_legacy
-        """)
-        db.execute("DROP TABLE projects_legacy")
-    if migrate_tasks:
-        db.execute("""
-            INSERT INTO tasks (
-                id, parent_task_id, title, description, status, priority,
-                due_date, completed_at, estimated_effort, energy_type,
-                fear_level, ambiguity_level, project_id, source_type, ai_generated,
-                created_at, updated_at, tags, dependencies, task_notes
-            )
-            SELECT
-                CAST(id AS TEXT), CAST(parent_task_id AS TEXT), title, description, status, priority,
-                due_date, completed_at, estimated_effort, energy_type,
-                fear_level, ambiguity_level, CAST(project_id AS TEXT), source_type, ai_generated,
-                created_at, updated_at, '[]', '[]', '[]'
-            FROM tasks_legacy
-        """)
-        db.execute("DROP TABLE tasks_legacy")
-
-
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ALLOWED_COLTYPES = {"TEXT", "INTEGER", "REAL"}
-
-
-def _ensure_column(db, table: str, column: str, coltype: str) -> None:
-    """Additive column migration for tables that already exist. Safe to call every
-    boot — no-ops once the column is present. Used for small, non-destructive schema
-    growth (e.g. tasks.psych_reasoning, chat_messages.sources) where a fresh
-    CREATE TABLE IF NOT EXISTS alone wouldn't reach an already-existing table.
-
-    All current callers pass hardcoded literals, never user/AI-derived values — SQLite's
-    ALTER TABLE doesn't support parameterized identifiers, so this validates against a
-    strict allowlist pattern before interpolating, rather than trusting callers forever."""
-    if not _IDENTIFIER_RE.match(table) or not _IDENTIFIER_RE.match(column):
-        raise ValueError(f"Unsafe identifier in _ensure_column: table={table!r} column={column!r}")
-    if coltype not in _ALLOWED_COLTYPES:
-        raise ValueError(f"Unsupported column type in _ensure_column: {coltype!r}")
-    if column not in _columns(db, table):
-        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-
-
 def init_db(app):
+    """Schema is created once via supabase_setup.sql run directly against the
+    Supabase project (see README) — Postgres isn't a per-boot local file, so there's
+    no equivalent of the old create-if-missing/migrate-on-boot dance SQLite needed.
+    This just wires up per-request connection cleanup."""
     app.teardown_appcontext(close_db)
-    with app.app_context():
-        db = get_db()
-        migrate_projects, migrate_tasks = _migrate_legacy_schema(db)
-        db.executescript("""
-            CREATE TABLE IF NOT EXISTS tokens (
-                provider     TEXT PRIMARY KEY,
-                access_token TEXT NOT NULL,
-                refresh_token TEXT,
-                token_type   TEXT NOT NULL DEFAULT 'Bearer',
-                expires_at   TEXT
-            );
-            CREATE TABLE IF NOT EXISTS calendars (
-                id         TEXT PRIMARY KEY,
-                name       TEXT NOT NULL,
-                color      TEXT NOT NULL DEFAULT '#4a9eff',
-                source     TEXT NOT NULL DEFAULT 'local',
-                ics_url    TEXT,
-                visible    INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                id             TEXT PRIMARY KEY,
-                calendar_id    TEXT NOT NULL REFERENCES calendars(id),
-                title          TEXT NOT NULL,
-                description    TEXT,
-                start_datetime TEXT NOT NULL,
-                end_datetime   TEXT,
-                all_day        INTEGER NOT NULL DEFAULT 0,
-                location       TEXT,
-                source_uid     TEXT,
-                created_at     TEXT NOT NULL,
-                updated_at     TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS chats (
-                id         TEXT PRIMARY KEY,
-                title      TEXT NOT NULL DEFAULT 'New Chat',
-                indexed    INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id         TEXT PRIMARY KEY,
-                chat_id    TEXT NOT NULL,
-                role       TEXT NOT NULL,
-                content    TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS note_connections (
-                id                 TEXT PRIMARY KEY,
-                source_path        TEXT NOT NULL,
-                target_path        TEXT NOT NULL,
-                source_collection  TEXT,
-                target_collection  TEXT,
-                distance           REAL,
-                summary            TEXT,
-                created_at         TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                id          TEXT PRIMARY KEY,
-                title       TEXT NOT NULL,
-                description TEXT,
-                status      TEXT DEFAULT 'active',
-                progress    INTEGER DEFAULT 0,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tasks (
-                id               TEXT PRIMARY KEY,
-                parent_task_id   TEXT,
-                title            TEXT NOT NULL,
-                description      TEXT,
-                status           TEXT DEFAULT 'inbox',
-                priority         TEXT DEFAULT 'medium',
-                due_date         TEXT,
-                completed_at     TEXT,
-                estimated_effort INTEGER,
-                energy_type      TEXT,
-                fear_level       INTEGER,
-                ambiguity_level  INTEGER,
-                project_id       TEXT REFERENCES projects(id),
-                source_type      TEXT DEFAULT 'manual',
-                ai_generated     INTEGER DEFAULT 0,
-                created_at       TEXT NOT NULL,
-                updated_at       TEXT NOT NULL,
-                tags             TEXT DEFAULT '[]',
-                dependencies     TEXT DEFAULT '[]',
-                task_notes       TEXT DEFAULT '[]'
-            );
-        """)
-        _finish_legacy_migration(db, migrate_projects, migrate_tasks)
-        _ensure_column(db, "tasks", "psych_reasoning", "TEXT")
-        _ensure_column(db, "chat_messages", "sources", "TEXT")
-        _ensure_column(db, "tasks", "recurring", "TEXT")
-        _ensure_column(db, "calendars", "import_as", "TEXT")
-        _ensure_column(db, "tasks", "source_uid", "TEXT")
-        _ensure_column(db, "tasks", "source_calendar_id", "TEXT")
-        db.commit()
 
 
 _TZ_NAME_RE = re.compile(r"^[A-Za-z0-9_+\-/]+$")

@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, request, redirect, url_for, make_response
 from db import get_db, init_db, reset_due_recurring_tasks
 
-VAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vault")
 from classes.Task import Task
 from classes.Project import Project
 from api import api_bp
@@ -25,6 +24,11 @@ import os
 app = Flask(__name__)
 app.secret_key = os.environ['FLASK_SECRET_KEY']
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Wires up per-request DB connection cleanup. Must run at import time (not just
+# under __main__) so it also applies when Vercel imports `app` directly as a WSGI
+# callable — __main__ never executes there.
+init_db(app)
 
 # Rotate at 1 MB, keep 3 backups → errors.log, errors.log.1, errors.log.2
 _log_handler = RotatingFileHandler("errors.log", maxBytes=1_000_000, backupCount=3)
@@ -105,7 +109,13 @@ def authorize():
             expires_at = datetime.fromtimestamp(float(token['expires_at']), tz=timezone.utc).isoformat()
         if token.get('refresh_token'):
             db.execute(
-                "INSERT OR REPLACE INTO tokens (provider, access_token, refresh_token, token_type, expires_at) VALUES (?, ?, ?, ?, ?)",
+                """INSERT INTO tokens (provider, access_token, refresh_token, token_type, expires_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (provider) DO UPDATE SET
+                       access_token = EXCLUDED.access_token,
+                       refresh_token = EXCLUDED.refresh_token,
+                       token_type = EXCLUDED.token_type,
+                       expires_at = EXCLUDED.expires_at""",
                 ('google', token['access_token'], token['refresh_token'], token.get('token_type', 'Bearer'), expires_at),
             )
         else:
@@ -769,27 +779,31 @@ def handle_exception(e):
 
 # ─── vault ────────────────────────────────────────────────────────────────────
 
+def _is_safe_vault_key(key: str) -> bool:
+    """Storage keys have no real filesystem to traversal-guard against, but a
+    `..` segment (however it got there) should never be treated as part of a
+    valid vault path."""
+    return ".." not in key.split("/")
+
+
 def _vault_tree() -> dict:
-    """Build {folder_name: [file_dicts]} from the vault directory."""
+    """Build {folder_name: [file_dicts]} from the vault Storage bucket."""
+    from services.vault import storage
     tree = {}
-    if not os.path.exists(VAULT_ROOT):
-        return tree
-    for entry in sorted(os.scandir(VAULT_ROOT), key=lambda e: (e.name != "inbox", e.name)):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
+    folders = sorted(storage.list_top_level_folders(), key=lambda n: (n != "inbox", n))
+    for folder in folders:
         files = []
-        for f in sorted(os.scandir(entry.path), key=lambda e: e.name):
-            if f.is_file() and not f.name.startswith("."):
-                stat = f.stat()
-                files.append({
-                    "name": f.name,
-                    "path": f"{entry.name}/{f.name}",
-                    "ext": Path(f.name).suffix.lower().lstrip(".") or "file",
-                    "mtime": Path(f.path).stat().st_mtime,
-                    "mtime_str": __import__("datetime").datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d"),
-                    "size": stat.st_size,
-                })
-        tree[entry.name] = files
+        for f in sorted(storage.list_files(folder), key=lambda e: e["name"]):
+            updated_at = datetime.fromisoformat(f["updated_at"].replace("Z", "+00:00"))
+            files.append({
+                "name": f["name"],
+                "path": f"{folder}/{f['name']}",
+                "ext": Path(f["name"]).suffix.lower().lstrip(".") or "file",
+                "mtime": updated_at.timestamp(),
+                "mtime_str": updated_at.strftime("%Y-%m-%d"),
+                "size": f["size"],
+            })
+        tree[folder] = files
     return tree
 
 
@@ -824,13 +838,13 @@ def vault_upload():
             continue
         try:
             from services.vault.processor import save_upload
-            path = save_upload(f, folder, VAULT_ROOT)
-            saved.append(Path(path).name)
+            key = save_upload(f, folder)
+            saved.append(Path(key).name)
             try:
                 from services.rag.indexer import index_file
-                index_file(path)
+                index_file(key)
             except Exception:
-                pass  # watcher will catch it
+                logger.exception("Failed to index uploaded file %s", key)
         except ValueError as e:
             errors.append(str(e))
         except Exception as e:
@@ -892,23 +906,22 @@ def vault_fetch_url():
         slug = _re.sub(r"-+", "-", slug).strip("-")[:80] or "page"
         filename = f"{slug}.html"
 
-        dest = os.path.join(VAULT_ROOT, folder, filename)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-
-        if os.path.exists(dest):
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        from services.vault import storage
+        key = f"{folder}/{filename}"
+        if storage.exists(key):
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             filename = f"{slug}-{ts}.html"
-            dest = os.path.join(VAULT_ROOT, folder, filename)
+            key = f"{folder}/{filename}"
 
-        with open(dest, "w", encoding="utf-8") as fh:
-            fh.write(html)
+        # Note: writes raw HTML directly, bypassing processor.py's HTML->markdown
+        # conversion — a pre-existing inconsistency, preserved as-is here.
+        storage.upload(key, html.encode("utf-8"), content_type="text/html")
 
         try:
             from services.rag.indexer import index_file
-            index_file(dest)
+            index_file(key)
         except Exception:
-            pass  # watcher will catch it
+            logger.exception("Failed to index fetched URL %s", key)
 
         return json.dumps({"saved": filename, "folder": folder}), 200, {"Content-Type": "application/json"}
 
@@ -924,7 +937,11 @@ def vault_new_folder():
     name = request.form.get("name", "").strip().lower()
     name = "".join(c for c in name if c.isalnum() or c in "-_")
     if name:
-        os.makedirs(os.path.join(VAULT_ROOT, name), exist_ok=True)
+        # Storage has no real "empty folder" concept — a zero-byte placeholder
+        # makes the folder show up immediately, filtered out of file listings
+        # the same way dotfiles were filtered on the old local-disk browser.
+        from services.vault import storage
+        storage.upload(f"{name}/.keep", b"", content_type="application/octet-stream")
     return redirect(url_for("vault_browser"))
 
 
@@ -937,23 +954,21 @@ def vault_move_file(filepath):
     if not dest_folder:
         return json.dumps({"error": "Destination folder is required"}), 400, {"Content-Type": "application/json"}
 
-    vault_real = os.path.realpath(VAULT_ROOT)
-    src = os.path.realpath(os.path.join(VAULT_ROOT, filepath))
-    if not src.startswith(vault_real + os.sep) or not os.path.isfile(src):
+    from services.vault import storage
+    if not _is_safe_vault_key(filepath) or not storage.exists(filepath):
         return json.dumps({"error": "File not found"}), 404, {"Content-Type": "application/json"}
 
-    dest_dir = os.path.join(VAULT_ROOT, dest_folder)
-    dest = os.path.join(dest_dir, os.path.basename(src))
-    if os.path.realpath(dest) == src:
+    filename = filepath.rsplit("/", 1)[-1]
+    dest_key = f"{dest_folder}/{filename}"
+    if dest_key == filepath:
         return json.dumps({"error": "File is already in that folder"}), 400, {"Content-Type": "application/json"}
 
     try:
-        os.makedirs(dest_dir, exist_ok=True)
         from services.rag.indexer import delete_file, index_file
-        delete_file(src)
-        os.rename(src, dest)
-        index_file(dest)
-        new_path = f"{dest_folder}/{os.path.basename(src)}"
+        delete_file(filepath)
+        storage.move(filepath, dest_key)
+        index_file(dest_key)
+        new_path = dest_key
         try:
             from services.connections.engine import delete_connections_for
             delete_connections_for(get_db(), filepath)
@@ -969,15 +984,15 @@ def vault_move_file(filepath):
 def vault_delete_file(filepath):
     if not get_current_user():
         return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
-    abs_path = os.path.realpath(os.path.join(VAULT_ROOT, filepath))
-    if not abs_path.startswith(os.path.realpath(VAULT_ROOT) + os.sep):
+    from services.vault import storage
+    if not _is_safe_vault_key(filepath):
         return json.dumps({"error": "Invalid path"}), 400, {"Content-Type": "application/json"}
-    if not os.path.isfile(abs_path):
+    if not storage.exists(filepath):
         return json.dumps({"error": "File not found"}), 404, {"Content-Type": "application/json"}
     try:
         from services.rag.indexer import delete_file
-        delete_file(abs_path)
-        os.remove(abs_path)
+        delete_file(filepath)
+        storage.delete(filepath)
         try:
             from services.connections.engine import delete_connections_for
             delete_connections_for(get_db(), filepath)
@@ -994,13 +1009,12 @@ def vault_delete_folder(name):
     if not get_current_user():
         return redirect(url_for("login"))
     name = "".join(c for c in name if c.isalnum() or c in "-_")
-    folder_path = os.path.join(VAULT_ROOT, name)
-    if os.path.isdir(folder_path) and folder_path.startswith(VAULT_ROOT + os.sep):
-        import shutil
-        shutil.rmtree(folder_path)
+    if name:
+        from services.vault import storage
+        storage.delete_prefix(f"{name}/")
         try:
-            from services.rag.store import _get_client
-            _get_client().delete_collection(name)
+            from services.rag.store import delete_collection
+            delete_collection(name)
         except Exception:
             pass
     return redirect(url_for("vault_browser"))
@@ -1010,10 +1024,13 @@ def vault_delete_folder(name):
 def vault_file_view(filepath):
     if not get_current_user():
         return redirect(url_for("login"))
-    abs_path = os.path.abspath(os.path.join(VAULT_ROOT, filepath))
-    if not abs_path.startswith(VAULT_ROOT + os.sep) or not os.path.isfile(abs_path):
+    from services.vault import storage
+    if not _is_safe_vault_key(filepath):
         return "Not found", 404
-    content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
+    try:
+        content = storage.download(filepath).decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return "Not found", 404
     if request.args.get("raw"):
         return content, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
@@ -1354,18 +1371,20 @@ def calendar_api_sync_cal(cal_id):
 
 
 def _start_rag():
-    """Run initial vault index + start file watcher in a background daemon thread."""
+    """Run an initial full vault reindex in a background daemon thread. No file
+    watcher: vault content now only exists in Supabase Storage, and every write
+    path (upload, fetch-url, create_note, move, delete) already reindexes
+    explicitly right after writing — there's no "external edit" a watcher could
+    still be needed to catch."""
     try:
-        from services.rag import indexer, watcher
+        from services.rag import indexer
         indexer.index_all()
-        watcher.start()
     except Exception:
         logger.exception("RAG startup failed — vault indexing disabled")
 
 
 if __name__ == "__main__":
     import threading
-    init_db(app)
     # Debug mode is opt-in (off by default) since Werkzeug's debugger allows
     # remote code execution if an unhandled exception is ever reachable from
     # outside localhost. Set FLASK_DEBUG=true for local development only.
@@ -1373,8 +1392,7 @@ if __name__ == "__main__":
     # With debug=True, Werkzeug's reloader re-execs this whole module in a child
     # process (WERKZEUG_RUN_MAIN=true there) and keeps the original as a stub
     # watching for restarts. Without this guard, both processes ran their own
-    # indexer + vault watcher, racing to write the same ChromaDB store on every
-    # file change.
+    # reindex pass concurrently.
     if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         threading.Thread(target=_start_rag, daemon=True).start()
     app.run(debug=debug)

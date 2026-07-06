@@ -40,8 +40,8 @@ class Project:
 
         if existing is None:
             fields["id"] = self.id
-            fields["created_at"] = self.created_at
-            fields["updated_at"] = self.updated_at
+            fields["created_at"] = self.created_at.isoformat()
+            fields["updated_at"] = self.updated_at.isoformat()
             cols = ", ".join(fields)
             placeholders = ", ".join("?" * len(fields))
             cursor.execute(
@@ -49,7 +49,7 @@ class Project:
                 list(fields.values()),
             )
         else:
-            fields["updated_at"] = self.updated_at
+            fields["updated_at"] = self.updated_at.isoformat()
             set_clause = ", ".join(f"{k}=?" for k in fields)
             cursor.execute(
                 f"UPDATE projects SET {set_clause} WHERE id=?",

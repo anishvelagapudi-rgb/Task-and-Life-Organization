@@ -11,7 +11,8 @@ with an explanation so you can judge whether to tune something.
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, sys, sqlite3, time, textwrap
+import os, sys, time, textwrap
+import psycopg2
 from datetime import datetime
 from pathlib import Path
 
@@ -55,8 +56,6 @@ def report_all():
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
-
-VAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vault")
 
 QCD_NOTE = textwrap.dedent("""\
     ---
@@ -118,31 +117,44 @@ DELETE_NOTE = textwrap.dedent("""\
 _TEST_FILES: list[str] = []
 
 def write_test_note(folder, filename, content):
-    path = os.path.join(VAULT_ROOT, folder, filename)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(content)
-    _TEST_FILES.append(os.path.abspath(path))
-    return os.path.abspath(path)
+    from services.vault import storage
+    key = f"{folder}/{filename}"
+    storage.upload(key, content.encode("utf-8"), content_type="text/markdown")
+    _TEST_FILES.append(key)
+    return key
+
+def _qcd_key():
+    """The QCD note is reused across several component tests within one run —
+    write it once, on first use."""
+    from services.vault import storage
+    key = "classes/_test_qcd.md"
+    if not storage.exists(key):
+        write_test_note("classes", "_test_qcd.md", QCD_NOTE)
+    return key
 
 def cleanup():
     from services.rag.store import delete_by_source
+    from services.vault import storage
     removed = 0
-    for path in _TEST_FILES:
-        folder = Path(path).relative_to(VAULT_ROOT).parts[0]
+    for key in _TEST_FILES:
+        folder = key.split("/", 1)[0]
         try:
-            delete_by_source(folder, path)
+            delete_by_source(folder, key)
         except Exception:
             pass
-        if os.path.exists(path):
-            os.remove(path)
+        try:
+            storage.delete(key)
             removed += 1
-    w(f"\n  Removed {removed} test file(s) from vault and ChromaDB.")
+        except Exception:
+            pass
+    w(f"\n  Removed {removed} test file(s) from vault Storage and the vector store.")
 
 def get_db():
-    db = sqlite3.connect("dev.db")
-    db.row_factory = sqlite3.Row
-    return db
+    # Reuse db.py's _PGConnection wrapper (gives .execute() with ?->%s rewriting
+    # and RealDictCursor rows) directly, bypassing get_db()'s Flask g-context
+    # dependency — this script runs with no Flask app/request context.
+    from db import _PGConnection
+    return _PGConnection(psycopg2.connect(os.environ["DATABASE_URL"]))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -150,9 +162,9 @@ def get_db():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def test_chunker_heading_split():
-    from services.rag.chunker import chunk_file
-    path = write_test_note("classes", "_test_qcd.md", QCD_NOTE)
-    chunks = chunk_file(path, "classes")
+    from services.rag.chunker import chunk_bytes
+    key = write_test_note("classes", "_test_qcd.md", QCD_NOTE)
+    chunks = chunk_bytes(QCD_NOTE.encode("utf-8"), key, "classes")
     headings = [c.heading for c in chunks if c.heading]
     passed = len(chunks) >= 2
     record(
@@ -167,11 +179,9 @@ def test_chunker_heading_split():
     )
 
 def test_chunker_frontmatter():
-    from services.rag.chunker import chunk_file
-    path = os.path.join(VAULT_ROOT, "classes", "_test_qcd.md")
-    if not os.path.exists(path):
-        write_test_note("classes", "_test_qcd.md", QCD_NOTE)
-    chunks = chunk_file(path, "classes")
+    from services.rag.chunker import chunk_bytes
+    key = _qcd_key()
+    chunks = chunk_bytes(QCD_NOTE.encode("utf-8"), key, "classes")
     c = chunks[0]
     tags_ok = "physics" in c.tags
     ai_ok   = not c.ai_generated
@@ -190,11 +200,9 @@ def test_chunker_frontmatter():
     )
 
 def test_chunker_size_limit():
-    from services.rag.chunker import chunk_file, CHUNK_MAX_CHARS
-    path = os.path.join(VAULT_ROOT, "classes", "_test_qcd.md")
-    if not os.path.exists(path):
-        write_test_note("classes", "_test_qcd.md", QCD_NOTE)
-    chunks = chunk_file(path, "classes")
+    from services.rag.chunker import chunk_bytes, CHUNK_MAX_CHARS
+    key = _qcd_key()
+    chunks = chunk_bytes(QCD_NOTE.encode("utf-8"), key, "classes")
     oversized = [len(c.text) for c in chunks if len(c.text) > CHUNK_MAX_CHARS + 100]
     passed = len(oversized) == 0
     record(
@@ -212,11 +220,11 @@ def test_chunker_size_limit():
 def test_indexer_dynamic_collection():
     from services.rag.indexer import _collection_for
     cases = [
-        ("inbox",      os.path.join(VAULT_ROOT, "inbox",      "x.md")),
-        ("school",     os.path.join(VAULT_ROOT, "school",     "x.md")),
-        ("custom-new", os.path.join(VAULT_ROOT, "custom-new", "x.md")),
+        ("inbox",      "inbox/x.md"),
+        ("school",     "school/x.md"),
+        ("custom-new", "custom-new/x.md"),
     ]
-    wrong = [(name, _collection_for(path)) for name, path in cases if _collection_for(path) != name]
+    wrong = [(name, _collection_for(key)) for name, key in cases if _collection_for(key) != name]
     passed = len(wrong) == 0
     record(
         name="Indexer — dynamic collection mapping",
@@ -232,12 +240,10 @@ def test_indexer_dynamic_collection():
 
 def test_indexer_runs():
     from services.rag.indexer import index_file
-    path = os.path.join(VAULT_ROOT, "classes", "_test_qcd.md")
-    if not os.path.exists(path):
-        write_test_note("classes", "_test_qcd.md", QCD_NOTE)
+    key = _qcd_key()
     error = None
     try:
-        index_file(path)
+        index_file(key)
     except Exception as e:
         error = str(e)
     passed = error is None
@@ -247,22 +253,19 @@ def test_indexer_runs():
         result=f"Success" if passed else f"Exception: {error}",
         passed=passed,
         explanation=(
-            "index_file() should chunk the file, embed it, and write to ChromaDB. "
+            "index_file() should chunk the file, embed it, and write to the vector store. "
             + ("Completed cleanly." if passed else f"Crashed with: {error}")
         ),
     )
 
 def test_indexer_idempotency():
     from services.rag.indexer import index_file
-    from services.rag.store import _get_collection
-    path = os.path.join(VAULT_ROOT, "classes", "_test_qcd.md")
-    if not os.path.exists(path):
-        write_test_note("classes", "_test_qcd.md", QCD_NOTE)
-    index_file(path)
-    col = _get_collection("classes")
-    count_first  = len(col.get(where={"source_path": path})["ids"])
-    index_file(path)
-    count_second = len(col.get(where={"source_path": path})["ids"])
+    from services.rag.store import count_by_source
+    key = _qcd_key()
+    index_file(key)
+    count_first  = count_by_source("classes", key)
+    index_file(key)
+    count_second = count_by_source("classes", key)
     passed = count_first > 0 and count_first == count_second
     record(
         name="Indexer — re-indexing same file is idempotent (no duplicates)",
@@ -270,7 +273,7 @@ def test_indexer_idempotency():
         result=f"After 1st index: {count_first} chunk(s)  |  After 2nd index: {count_second} chunk(s)",
         passed=passed,
         explanation=(
-            "The file watcher fires on every save, so indexing must be safe to call repeatedly. "
+            "Every vault write path reindexes explicitly after writing, so indexing must be safe to call repeatedly. "
             "upsert() with stable IDs (md5(path)_N) should overwrite, not accumulate. "
             + ("Chunk count stable — upsert working correctly." if passed
                else f"Count changed ({count_first} → {count_second}) — duplicates are being created.")
@@ -295,7 +298,7 @@ def test_indexer_delete():
         result=f"Found before: {found_before}  |  Found after: {found_after}",
         passed=passed,
         explanation=(
-            "Deleting a vault file should remove its chunks from ChromaDB so stale content "
+            "Deleting a vault file should remove its chunks from the vector store so stale content "
             "is never returned. "
             + ("Deletion confirmed — note no longer retrievable." if passed
                else f"Issue — found_before={found_before}, found_after={found_after}. "
@@ -374,7 +377,7 @@ def test_retrieval_cross_collection():
         result=f"Top sources: {sources[:3]}",
         passed=passed,
         explanation=(
-            "Retrieval searches all ChromaDB collections by default, not just 'classes'. "
+            "Retrieval searches all vector store collections by default, not just 'classes'. "
             + ("People note surfaced correctly." if passed
                else "Person note not found — cross-collection search may not be working.")
         ),
@@ -539,7 +542,7 @@ def test_search_vault_tool():
         passed=passed,
         explanation=(
             "Asking the AI to 'search my notes' should trigger the search_vault tool call, "
-            "which queries ChromaDB and returns chunks. "
+            "which queries the vector store and returns chunks. "
             + (f"Tool returned vault content — terms: {hits}." if passed
                else "No QCD terms in reply — tool may not have been called, "
                     "or ChromaDB returned empty results.")
@@ -549,8 +552,8 @@ def test_search_vault_tool():
 def test_create_note_tool():
     from services.ai.service import AIService
     from services.ai.gemini_provider import GeminiProvider
-    ai_gen_dir = os.path.join(VAULT_ROOT, "ai_generated")
-    before = set(os.listdir(ai_gen_dir)) if os.path.isdir(ai_gen_dir) else set()
+    from services.vault import storage
+    before = set(storage.list_keys("ai_generated"))
 
     svc = AIService(GeminiProvider())
     reply, sources = svc.chat(get_db(), [{"role": "user",
@@ -558,17 +561,15 @@ def test_create_note_tool():
                     "Title: 'RAG Pipeline Overview'. Filename: rag-pipeline-overview")}])
 
     time.sleep(1)
-    after    = set(os.listdir(ai_gen_dir)) if os.path.isdir(ai_gen_dir) else set()
+    after     = set(storage.list_keys("ai_generated"))
     new_files = after - before
 
     if new_files:
-        for nf in new_files:
-            _TEST_FILES.append(os.path.join(ai_gen_dir, nf))
+        _TEST_FILES.extend(new_files)
 
     file_content = ""
     if new_files:
-        nf_path = os.path.join(ai_gen_dir, next(iter(new_files)))
-        file_content = Path(nf_path).read_text()
+        file_content = storage.download(next(iter(new_files))).decode("utf-8")
 
     has_file       = bool(new_files)
     has_reviewed   = "reviewed: false" in file_content.lower() or "reviewed: False" in file_content

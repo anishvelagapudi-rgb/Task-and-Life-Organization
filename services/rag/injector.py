@@ -10,9 +10,7 @@ def build_context(chunks: list[StoredChunk]) -> str:
     ]
     for i, c in enumerate(chunks, 1):
         src = c.source_path
-        if "/data/vault/" in src:
-            src = src.split("/data/vault/", 1)[1]
-        elif src.startswith("chats/"):
+        if src.startswith("chats/"):
             src = "[past conversation]"
         heading_label = f" § {c.heading}" if c.heading else ""
         lines.append(f"\n[{i}] {src}{heading_label}")

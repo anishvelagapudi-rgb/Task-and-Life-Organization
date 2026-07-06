@@ -4,7 +4,7 @@ _This file is meant to be the single, complete, pasteable source of truth for th
 project — everything worth knowing, ordered from most to least important. If you're
 an AI being handed this file with no other repo access, read top to bottom; by the
 time you reach "Running Locally" at the end you have the full picture. Last synced
-to actual codebase state: 2026-07-04._
+to actual codebase state: 2026-07-06._
 
 This is my answer to a problem I kept running into: I had tasks in Canvas, deadlines
 in my head, notes scattered across apps, and an AI assistant that forgot everything
@@ -73,20 +73,30 @@ Three layers:
 | Layer | Technology |
 |---|---|
 | Backend | Flask (Python) |
-| Database | SQLite (`dev.db`), raw SQL, no ORM |
+| Database | Postgres via Supabase, raw SQL through a thin psycopg2 wrapper, no ORM |
 | Templates | Jinja2 server-rendered HTML |
 | AI | Gemini 2.5 Flash Lite via `google-genai` SDK |
 | Auth | Google OAuth 2.0 (Authlib), single-owner email gate |
 | Config | `.env` file |
-| Vector store | ChromaDB (`/data/chroma/`), local, disk-persisted |
-| Embeddings | `text-embedding-004` (Google) |
+| Vector store | Postgres + `pgvector` (same Supabase project), exact cosine search, no ANN index |
+| File storage | Supabase Storage (private `vault` bucket) — replaces local `data/vault/` |
+| Embeddings | `gemini-embedding-001` (Google), 3072-dim |
 | Calendar sync | Google Calendar API (read-only) + `icalendar` for one-way ICS import |
 | Date parsing | `dateparser` (deterministic NL date parsing, no AI) |
 
-SQLite was chosen deliberately: single user, no concurrent writes, no operational
-overhead. SQLAlchemy/Flask-Migrate/MySQL were considered and rejected for this use
-case — don't introduce an ORM or a different DB without checking with the owner
-first; this gets revisited only at actual deployment time, not preemptively.
+**Migrated from SQLite/ChromaDB/local vault files to Supabase (2026-07-06)**, driven
+by the decision to deploy on Vercel: serverless functions have no persistent local
+disk and no long-running background process, both of which the original design
+depended on (`dev.db`, a local ChromaDB store, vault markdown files on disk, and a
+`watchdog` file-watcher thread). SQLite/local-disk was still the right call for pure
+local-only use — this migration exists specifically *because* deployment moved to a
+platform without a writable persistent filesystem, not because the original choice
+was wrong. See `supabase_setup.sql` for the schema and the "Vault," "RAG Pipeline,"
+and "AI Layer" sections below for what changed in each subsystem. `pgvector`'s ANN
+index (HNSW) caps out at 2000 dimensions; `gemini-embedding-001` produces 3072, so
+`vault_chunks` has no vector index and does an exact brute-force `<=>` cosine scan
+per query instead — more accurate than an approximate index, and fast enough at this
+app's scale (a personal vault, low thousands of chunks at most).
 
 ---
 
@@ -99,9 +109,14 @@ first; this gets revisited only at actual deployment time, not preemptively.
   health check) for external callers (e.g. N8N).
 - `ai_routes.py` — `/api/ai/*` blueprint. `GET /api/ai/recommendations` and
   `POST /api/ai/chat`, both bearer-token gated.
-- `db.py` — raw `sqlite3` access via Flask's `g`, plus `init_db()` which creates all
-  tables with `CREATE TABLE IF NOT EXISTS`. **No migration system** — schema changes
-  are additive edits to this script, backward-compatible by construction. Also holds
+- `db.py` — `psycopg2` access via Flask's `g`, wrapped in a small `_PGConnection`
+  class that adds sqlite3-style `.execute(sql, params)` (psycopg2 only puts that on
+  cursors) and rewrites the codebase's `?` placeholders to psycopg2's `%s`, so the
+  vast majority of call sites across the app needed zero changes when the DB moved
+  off SQLite. Rows come back via `RealDictCursor`, so `row["col"]`/`dict(row)` still
+  work unchanged. **Schema lives in `supabase_setup.sql`** (run once, directly
+  against the Supabase project) — `init_db()` no longer creates tables, it just wires
+  up per-request connection cleanup (`app.teardown_appcontext(close_db)`). Also holds
   `enforce_recurring_invariant()` (shared between the REST API and the AI tool
   executor) and `reset_due_recurring_tasks()` (see Data Model below).
 - `classes/Task.py`, `classes/Project.py` — plain Python objects with a
@@ -115,6 +130,12 @@ first; this gets revisited only at actual deployment time, not preemptively.
   `api.py` instead builds SQL dynamically from field whitelists
   (`TASK_FIELDS`/`PROJECT_FIELDS`). **Both paths write to the same tables — keep them
   in sync when changing schema.**
+- `services/vault/storage.py` — the single choke point for the Supabase Storage
+  `vault` bucket (`upload`/`download`/`exists`/`list_keys`/`list_top_level_folders`/
+  `delete`/`delete_prefix`/`move`). Replaced three previously-independent local-disk
+  write paths (`processor.py`'s upload converter, `app.py`'s URL-fetch route, and the
+  `create_note` AI tool's inline `open()` call) — all three now call this module
+  instead of touching a filesystem.
 
 **Auth is two separate, non-interchangeable mechanisms:** `api.py` and
 `ai_routes.py` gate on `Authorization: Bearer <key>` checked against `API_KEY_HASH`
@@ -124,7 +145,7 @@ resets on server restart.
 
 ---
 
-## Data Model (SQLite, `dev.db`, raw SQL — no ORM)
+## Data Model (Postgres via Supabase, raw SQL — no ORM)
 
 **`tasks`**
 - Core: `id` (TEXT/UUID), `title`, `description`, `status`, `priority`, `due_date`,
@@ -225,8 +246,18 @@ and Calendar API reads, auto-refreshed near expiry.
 `target_path`, `source_collection`, `target_collection`, `distance`, `summary`,
 `created_at`. Upserted by `(source_path, target_path)` on every discovery call — acts
 as a cache/log, not a rigorously-designed invalidation strategy. Rows for a deleted
-vault file are best-effort cleaned up on vault delete/move, mirroring how the
-ChromaDB index is already cleaned up on delete.
+vault file are best-effort cleaned up on vault delete/move, mirroring how the vector
+store's index is already cleaned up on delete.
+
+**No foreign key constraints anywhere** (`project_id`, `parent_task_id`,
+`calendar_id`, etc. are plain `TEXT` columns, not `REFERENCES`) — a deliberate
+carry-over from SQLite, not an oversight. SQLite never enforced the `REFERENCES`
+clauses the old schema declared (`PRAGMA foreign_keys` was never turned on), and
+`app.py`'s `delete_project()` route actively depends on that being unenforced — it
+deletes a project without first clearing `tasks.project_id` for tasks that belong to
+it. Postgres enforces FKs by default, so declaring them for real would have broken
+that route the first time someone deleted a project with tasks in it. Revisit only if
+that route's behavior is intentionally changed first.
 
 ---
 
@@ -253,12 +284,20 @@ ChromaDB index is already cleaned up on delete.
   paths that bypass the normal round-trip.
 - `budget.py` — rolling 1-hour wall-clock dollar-cost window across all API calls
   (generative + embedding); raises `BudgetExceededError` over the limit, recovers as
-  old calls age out. In-memory only (clears on restart, intentional — not persisted
-  to disk). Cost derived from `prompt_token_count` + `tool_use_prompt_token_count`
-  (input) and `candidates_token_count` + `thoughts_token_count` (output) — earlier
-  versions undercounted by dropping the tool-use/thinking-token fields. Configurable
-  via `AI_HOURLY_BUDGET` (currently $0.15/hour, raised 2026-07-03 from an initial
-  $0.05 placeholder). Every call logged to `costs.log`.
+  old calls age out. **Backed by a Postgres table (`ai_usage_log`)**, not an
+  in-memory deque — deliberately migrated off in-memory (2026-07-06) because a
+  process-local window silently gets *weaker*, not just non-persistent, once more
+  than one server instance can be running (e.g. multiple Vercel serverless
+  instances): each instance would get its own independent budget, multiplying the
+  effective cap instead of sharing one. `check()` and `record_usage()`/
+  `record_embedding_usage()` keep the exact same signatures and pre-flight/post-hoc
+  semantics as before — only the storage backend changed. Cost derived from
+  `prompt_token_count` + `tool_use_prompt_token_count` (input) and
+  `candidates_token_count` + `thoughts_token_count` (output) — earlier versions
+  undercounted by dropping the tool-use/thinking-token fields. Configurable via
+  `AI_HOURLY_BUDGET` (currently $0.15/hour, raised 2026-07-03 from an initial $0.05
+  placeholder). Every call also logged to `costs.log` (local file, write-only audit
+  trail, never read back — harmless to lose on a serverless cold start).
 - `GET /api/ai/recommendations` — top 3 prioritized tasks + a short insight, JSON.
   Recommendation logic and the AI's ability to set the 4 psychological fields have
   stayed untouched through every later feature added on top.
@@ -344,29 +383,51 @@ project, which is the whole reason it exists.
 
 ### Concepts
 
-- **Embeddings** — `text-embedding-004` turns any string into a 768-float vector
-  representing semantic meaning. Similar meaning → similar direction ("fear of
-  failure before an exam" and "test anxiety holding me back" land close together;
-  "the French Revolution" and "chicken tikka masala" land far apart). Similarity is
-  measured via **cosine similarity** (1.0 = identical, 0 = unrelated, -1 = opposite);
-  relevant matches typically score 0.7–0.9.
+- **Embeddings** — `gemini-embedding-001` turns any string into a 3072-float vector
+  representing semantic meaning (empirically confirmed via a live `embed_query()`
+  call — this is the successor to `text-embedding-004`, which the codebase no longer
+  uses, despite that older model's name lingering in some earlier notes). Similar
+  meaning → similar direction ("fear of failure before an exam" and "test anxiety
+  holding me back" land close together; "the French Revolution" and "chicken tikka
+  masala" land far apart). Similarity is measured via **cosine distance** through
+  pgvector's `<=>` operator — 0 means identical direction, larger means less similar
+  (this is the inverse framing of "cosine similarity," where higher used to mean more
+  similar under ChromaDB; every distance threshold in this codebase — e.g.
+  `MAX_DISTANCE` in `retriever.py`/`engine.py` — is already tuned against the
+  distance framing, unchanged by the pgvector migration since Chroma's collections
+  were also configured for cosine distance internally).
 - **Chunking** — notes are split into ~500-token chunks at heading/paragraph
   boundaries before embedding, not embedded whole (a 3000-word note's embedding would
   be a blurry average of all its topics — not precise enough for retrieval). Sharper
   precision, cheaper injection (500 targeted tokens instead of 3000 tangential ones).
   Each chunk stores its original text alongside its vector so it can be read back
   when retrieved.
-- **Indexing** (on startup, and automatically on file change via `watchdog`): read
-  markdown → parse YAML frontmatter → chunk the body → embed each chunk → write
-  vector + text + metadata to ChromaDB.
-- **Retrieval** (on every AI query): embed the user's message → ask ChromaDB for the
-  k nearest stored chunks → format as context → prepend to the prompt. The AI never
-  needs to know anything in advance; it just receives relevant context inline.
-- **ChromaDB** — local, in-process, disk-persisted at `/data/chroma/`. One
-  **collection per vault folder** (so retrieval can be scoped — a project question
-  doesn't search journal entries). Supports metadata filtering (e.g. exclude
-  `ai_generated=true`), which is why vault frontmatter conventions matter — they map
-  directly to ChromaDB metadata.
+- **Indexing** (on full-vault reindex at local server startup, and explicitly,
+  synchronously, right after every vault write): read a file's bytes from Supabase
+  Storage → parse YAML frontmatter → chunk the body → embed each chunk → write
+  vector + text + metadata to the `vault_chunks` Postgres table. There is no
+  background file-watcher anymore (`services/rag/watcher.py` was deleted, see below)
+  — every write path (`vault_upload`, `vault_fetch_url`, `create_note`, move,
+  delete) already calls `index_file`/`delete_file` immediately after writing, and
+  Storage has no concept of an external process editing files underneath the app the
+  way local disk did, so there's nothing left for a watcher to catch.
+- **Retrieval** (on every AI query): embed the user's message → ask the
+  `vault_chunks` table for the k nearest chunks per collection → format as context →
+  prepend to the prompt. The AI never needs to know anything in advance; it just
+  receives relevant context inline.
+- **Storage backend** — Postgres + `pgvector`, same Supabase project as the rest of
+  the app's data (migrated 2026-07-06 from local ChromaDB at `/data/chroma/`). One
+  logical **collection per vault folder**, but physically a single `vault_chunks`
+  table with a `collection` filter column, not one table per folder — collection
+  names are dynamic/unbounded (any new vault folder becomes one), so a table-per-
+  collection design would require runtime DDL every time the user creates a folder.
+  `list_collections()` now returns only collections with ≥1 chunk (a collection
+  "disappears" once its last chunk is deleted) — a harmless behavior difference from
+  Chroma, which kept empty collection objects alive; `retriever.py` searching one
+  fewer, empty collection produces identical results either way. Metadata filtering
+  (e.g. `ai_generated`/`reviewed` flags) is now plain columns instead of a JSON
+  metadata blob, which is why vault frontmatter conventions still matter — they map
+  directly to those columns via `chunker.py`.
 
 ### What data belongs in RAG vs. not
 
@@ -384,15 +445,15 @@ exact match rather than semantic approximation.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Embeddings model | `text-embedding-004` | Already paying for Gemini; same key, no extra cost |
-| Vector store | ChromaDB, local | Zero ops overhead, fits single-user |
-| Collections | One per vault folder | Scoped retrieval |
+| Embeddings model | `gemini-embedding-001` | Already paying for Gemini; same key, no extra cost |
+| Vector store | Postgres + `pgvector` (Supabase) | Same provider as the rest of the app's data; no persistent-local-disk dependency, unlike local ChromaDB |
+| Collections | One per vault folder (a `collection` column, not separate tables) | Scoped retrieval without runtime DDL for new folders |
 | Chunk size | ~500 tokens | Precision vs. context completeness |
 | Chunk splitting | Heading/paragraph boundaries | Preserves semantic units |
 | Top-k default | 5 (adjustable to 10) | Enough context without token bloat |
-| File watcher | `watchdog` | Auto re-index on vault changes |
+| Re-indexing trigger | Explicit, synchronous, right after each vault write | No background watcher needed once vault content only exists in Storage |
 | Retrieval modes | Passive (every query) + Active (`search_vault` tool) | Ambient vs. explicit lookup |
-| AI-generated notes | `/data/vault/ai_generated/`, always `reviewed: false` | Never cited as ground truth |
+| AI-generated notes | `ai_generated/` folder in the vault Storage bucket, always `reviewed: false` | Never cited as ground truth |
 
 ### Component seams (for the Ship of Theseus rewrite)
 
@@ -403,15 +464,17 @@ pass, answer quality stays the same or improves.
 |---|---|---|
 | `chunker.py` | Splits a note into text segments; carries `ai_generated`/`reviewed` flags read from frontmatter through to each `Chunk` | in: raw markdown string → out: list of `Chunk` objects |
 | `embedder.py` | Text → vector | in: string → out: list of floats. Swappable to local models (e.g. `nomic-embed-text` via Ollama) |
-| `store.py` | Stores/searches vectors (ChromaDB wrapper) | `upsert(id, vector, text, metadata)`, `query(vector, k, filters)` — could become SQLite+manual cosine, Weaviate, pgvector |
+| `store.py` | Stores/searches vectors (`pgvector` via psycopg2) | `upsert_chunks`, `delete_by_source`, `query_collection`, `list_collections` — public API kept stable across the ChromaDB→pgvector migration so this was the only file whose internals changed |
 | `retriever.py` | Query → top-k chunks | in: query string + optional filters → out: `{text, metadata, score}` list |
 | `injector.py` | Formats retrieved chunks into prompt context | in: chunk list → out: formatted string |
 
-Other files: `indexer.py` (drives full vault indexing), `watcher.py` (watchdog
-re-indexing — guarded against Flask's debug reloader double-starting it, see the
-`WERKZEUG_RUN_MAIN` bug below), `chat_indexer.py` (indexes chat transcripts when
-"save to vault" is on). RAG is skipped for short/simple messages
-(`_should_skip_rag`).
+Other files: `indexer.py` (drives full vault indexing — reads file lists from
+`services/vault/storage.py` instead of `os.walk` since 2026-07-06), `chat_indexer.py`
+(indexes chat transcripts when "save to vault" is on). RAG is skipped for
+short/simple messages (`_should_skip_rag`). `watcher.py` (a `watchdog`-based file
+watcher) existed through 2026-07-06 and was then deleted outright, not just
+disconnected — see "Vault" below for why it became unnecessary once vault content
+moved to Supabase Storage.
 
 ### Two real bugs fixed here (2026-07-04)
 
@@ -427,7 +490,10 @@ re-indexing — guarded against Flask's debug reloader double-starting it, see t
    dropped. Fixed to skip just the affected chunk (logging a warning) and keep the
    rest of the collection's real results. Don't reintroduce a blanket
    catch-and-swallow here — that's the anti-pattern that caused this bug in the
-   first place.
+   first place. **This exact behavior was deliberately preserved** in the 2026-07-06
+   pgvector rewrite of `store.py` — `query_collection` still skips just the offending
+   row (defense in depth, even though `source_path` is now `NOT NULL`) and still
+   catches the whole function into `[]` on any lower-level failure.
 
 ### A third, older bug fixed here
 
@@ -437,7 +503,23 @@ each other and against test scripts on the same persistent ChromaDB store. This
 affected the whole RAG pipeline, not any one feature — it just never surfaced
 visibly until the connection engine's test suite made the resulting flakiness
 obvious. Fixed with a guard clause near `app.py`'s `if __name__ == "__main__":`
-block.
+block. **Superseded, not just fixed:** the watcher this bug was about no longer
+exists at all as of 2026-07-06 — see "Vault" below.
+
+### A real bug caught during the pgvector migration (2026-07-06)
+
+`query_collection`'s `ORDER BY embedding <=> %s` silently returned zero rows for
+every query — no exception, no error, just empty results everywhere retrieval was
+used. Cause: passing a plain Python `list[float]` as a query parameter is ambiguous
+for Postgres — without an assignment target to infer the type from (unlike an
+`INSERT` into a known `vector` column, which worked fine), it defaulted to
+`numeric[]`, and `<=>` has no defined overload for `vector <=> numeric[]`. Fixed by
+wrapping query embeddings in pgvector's `Vector(...)` wrapper type before binding
+them as query parameters, which forces the correct type at bind time regardless of
+SQL context. Caught by actually running `rag_test.py` end-to-end after the rewrite,
+not by code review — a reminder that a migration like this isn't done until the
+integration tests that exercise the real query path have actually been run, not just
+until the code compiles and the individual pieces look right in isolation.
 
 ---
 
@@ -453,7 +535,7 @@ interface, independently testable" discipline. Reads the existing vector store
 `embedder.embed_query` — public functions only, never modified). Deliberately does
 **not** import `retriever.py`/`injector.py` (those encode the standard pipeline's
 own ranking/formatting opinions, which this layer intentionally overrides). Results
-are cached in `note_connections` (SQLite) — deliberately **not** a new ChromaDB
+are cached in `note_connections` (Postgres) — deliberately **not** a new vector-store
 collection, because `retriever.retrieve()` defaults to searching every collection
 `list_collections()` returns (`target = collections or list_collections()`); a new
 "connections" collection would have silently polluted ordinary passive-RAG
@@ -526,18 +608,40 @@ CREATE TABLE IF NOT EXISTS note_connections (
 
 ---
 
-## Vault (`services/vault/`, files at `data/vault/`, git-ignored)
+## Vault (`services/vault/`, files in the Supabase Storage `vault` bucket)
 
-`processor.py` handles upload/conversion (`.md .txt .pdf .html .docx .csv`) and URL
-fetch (fetch a URL, save its content to the vault). Also: file move/delete, folder
-create/delete, folder picker UI. Folder taxonomy is **fixed**: `people / projects /
-reference / journal / inbox`, plus `ai_generated/` for AI-authored notes — always
-`ai_generated: true`/`reviewed: false` in frontmatter, never treated as ground
-truth. The `create_note` AI tool previously wrote to `inbox/` with no flags at all,
-contradicting this convention — fixed to write to `ai_generated/` with the correct
-frontmatter. Frontmatter fields map directly to ChromaDB metadata (via
-`chunker.py`), so keep frontmatter conventions consistent when adding vault-writing
-code. Viewer at `/vault/file/<path>`.
+**Migrated off local disk to Supabase Storage on 2026-07-06**, alongside the
+database/vector-store migration, for the same reason: Vercel serverless has no
+persistent local filesystem, and the vault previously lived entirely at
+`data/vault/` with three independent local-disk write paths (`processor.py`'s
+upload converter, `app.py`'s URL-fetch route, and the `create_note` AI tool's own
+inline `open()` call). All three now go through `services/vault/storage.py`
+instead — bucket keys mirror the old `folder/filename` layout exactly (e.g.
+`journal/2026-07-05-note.md`), so `indexer.py`'s "first path segment = collection
+name" rule needed no changes beyond swapping its input source. Storage has no real
+"empty folder" concept, so creating a folder writes a zero-byte `folder/.keep`
+placeholder, filtered out of listings the same way dotfiles were filtered on the old
+local-disk browser.
+
+`processor.py` handles upload/conversion (`.md .txt .pdf .html .docx .csv`, now
+bytes-in/key-out rather than bytes-in/path-out) and URL fetch (fetch a URL, save its
+content to the vault — still writes raw HTML directly, bypassing markdown
+conversion, a pre-existing inconsistency preserved as-is through the migration, not
+fixed). Also: file move/delete (native Storage `move`, not a local `os.rename`),
+folder create/delete, folder picker UI. Folder taxonomy (`people / projects /
+reference / journal / inbox`, plus `ai_generated/` for AI-authored notes) is a
+**convention, not code-enforced** — `app.py` only sanitizes folder names to
+alphanumeric/`-`/`_` and accepts any value, so a new top-level folder just works.
+AI-authored notes are always `ai_generated: true`/`reviewed: false` in frontmatter,
+never treated as ground truth. The `create_note` AI tool previously wrote to
+`inbox/` with no flags at all, contradicting this convention — fixed to write to
+`ai_generated/` with the correct frontmatter. Frontmatter fields map directly to
+`vault_chunks` columns (via `chunker.py`, now reading bytes instead of a local
+path), so keep frontmatter conventions consistent when adding vault-writing code.
+Viewer at `/vault/file/<path>`, now backed by `storage.download()` instead of a
+local file read, with a lighter `..`-segment check replacing the old
+`os.path.realpath` traversal guard (there's no real filesystem path to guard
+anymore, just a Storage key).
 
 ---
 
@@ -597,29 +701,47 @@ keyboard shortcut to focus the bar.
 
 ## Infrastructure / Conventions
 
-- No migration tool — schema changes go directly into `CREATE TABLE IF NOT EXISTS`
-  blocks in `db.py`, additive/backward-compatible by construction.
+- No migration tool — schema lives in `supabase_setup.sql`, applied once directly
+  against the Supabase project's Postgres instance (not run by the app itself on
+  boot, unlike the old SQLite `CREATE TABLE IF NOT EXISTS`-on-every-launch pattern).
+  Schema changes going forward mean editing that file and re-running it by hand.
 - Secrets only in `.env` (git-ignored): `FLASK_SECRET_KEY`, `GOOGLE_CLIENT_ID`,
   `GOOGLE_CLIENT_SECRET`, `OWNER_EMAIL`, `GEMINI_API_KEY`, `API_KEY_HASH`,
-  `AI_HOURLY_BUDGET`. `api_test.js` intentionally hardcodes a *local dev* API key for
-  test-script convenience — not an acceptable pattern in application code.
-- `errors.log`, `costs.log` — rotating (1MB × 3 backups), git-ignored.
+  `AI_HOURLY_BUDGET`, `FLASK_DEBUG` (opt-in, defaults off — Werkzeug's debugger is
+  RCE-capable if reachable from outside localhost), plus the Supabase trio:
+  `DATABASE_URL` (the **pooled** connection string, port 6543 — not the direct
+  :5432 URL, to avoid exhausting Supabase's direct connection cap once many
+  short-lived Vercel function instances exist), `SUPABASE_URL`, and
+  `SUPABASE_SECRET_KEY` (Supabase's current name for what used to be called the
+  service_role key — server-side only, never exposed to the browser).
+  `api_test.js` intentionally hardcodes a *local dev* API key for test-script
+  convenience — not an acceptable pattern in application code.
+- `errors.log`, `costs.log` — rotating (1MB × 3 backups), git-ignored. Still local
+  files even after the Supabase migration — harmless to lose on a serverless cold
+  start since neither is read back by the app itself.
 
 ---
 
-## Current Test Status (verified 2026-07-04)
+## Current Test Status (verified 2026-07-06, against Supabase)
 
-- `python rag_test.py` — **19/19 pass** (the last remaining failure,
-  `test_chunker_frontmatter`, is now fixed — see RAG Pipeline bugs above)
-- `python connection_test.py` — **6/6 pass**, stable across repeated runs
-- `node api_test.js` — **29/29 pass**
+- `python rag_test.py` — **19/19 pass**, now running against Postgres/pgvector/
+  Storage fixtures instead of SQLite/ChromaDB/local disk (`write_test_note`/
+  `cleanup` rewritten to go through `services/vault/storage.py`, `chunk_file`→
+  `chunk_bytes`, `_get_collection` private-API reach-around→`count_by_source`)
+- `python connection_test.py` — **6/6 pass**, same fixture rewrite applied
+- `node api_test.js` — **29/29 pass** unchanged (it only hits `/api/*` over HTTP, no
+  direct DB/vault access, so it needed no code changes — just a rotated API key,
+  since the previously-hardcoded one had drifted out of sync with `.env`'s
+  `API_KEY_HASH` before this session)
 
 No known-broken tests remain. Neither test harness covers HTML-facing/cookie-authed
 browser routes at all (e.g. the capture bar, the recurring-tasks modal, the
-psych-field disclosure) — verification for those has been ad hoc (Flask's
-`test_client()`, manual DB checks, and manual browser use), not part of either
-permanent suite. This is an open regression-protection gap, not something either
-harness was designed to cover.
+psych-field disclosure, or the rewritten vault routes) — verification for those
+during the Supabase migration was ad hoc (Flask's `test_client()` with a fake
+`VALID_SESSIONS` entry, exercising upload/browse/view/move/delete/folder-create-
+delete end to end, plus direct Postgres/Storage queries to confirm no orphaned
+rows/objects were left behind), not part of either permanent suite. This is an open
+regression-protection gap, not something either harness was designed to cover.
 
 ---
 
@@ -627,8 +749,16 @@ harness was designed to cover.
 
 ### Deferred — not needed right now
 
-- **Deployment** — local-only is fine; not currently blocking daily use. SQLite-vs-
-  something-else gets revisited at that point, not before.
+- **Actually deploying to Vercel** — the groundwork is done (Postgres/pgvector/
+  Storage migration, `api/index.py` + `vercel.json` entrypoint, `init_db(app)` moved
+  to module level so it runs under Vercel's WSGI import too, not just
+  `python app.py`), but a real `vercel dev`/preview deploy hasn't been exercised
+  yet — that needs the owner's Vercel account. **Known, accepted limitation carried
+  into that deploy:** `VALID_SESSIONS` (login) stays an in-memory dict by explicit
+  owner decision (single-user app, not worth the complexity of moving session state
+  to a shared store) — meaning logins can appear to randomly drop across multiple
+  warm Vercel instances, the same root cause the AI budget guard used to have before
+  it was moved to Postgres. Informed tradeoff, not an oversight.
 - **Canvas ICS-to-task importer** — summer, not the pressure point right now. ICS
   calendar *event* sync already exists and is enough for the moment.
 - **Proactive nudges** ("you haven't touched this in 2 weeks") — explicitly out of
@@ -677,36 +807,65 @@ calendar imports (solved, read-only Google Calendar).
 4. **Connection-engine distance band at scale** — 0.15–0.40 was tuned against a
    handful of real notes plus test fixtures, not a large real vault — may need
    adjustment as more content is indexed.
+5. **Session storage on serverless** — `VALID_SESSIONS` staying in-memory (owner's
+   explicit call, see "What Is Not Done" above) means login can behave inconsistently
+   once more than one warm Vercel instance exists. Not planned to be revisited unless
+   it's actually disruptive in practice after a real deploy.
 
 ---
 
-## Working-Tree State (as of 2026-07-04)
+## Working-Tree State (as of 2026-07-06)
 
-A large amount of work — the capture bar, psych-field collapse, source citations,
-connection engine v1, recurring tasks, the tech-debt/timezone/`db_push` fixes, and
-the two RAG bug fixes described above — exists in the local working tree but has
-**not been committed** (deliberately deferred by the owner, to be handled
-separately). `git diff --stat` touches ~24 files plus new ones (`services/
-connections/`, `templates/_recurring_modal.html`). No destructive git operations
-have been run. Check `git status`/`git diff` before assuming `HEAD` reflects current
-functionality — it doesn't.
+Two rounds of uncommitted work now sit in the local tree, neither committed
+(deliberately deferred by the owner, to be handled separately):
 
-**Not yet done, flagged explicitly:** none of this has been exercised in a real
-browser by an AI session — verification so far has used `py_compile`, direct Python
-calls, and Flask's headless `test_client()` (real routing/view code and real cookie
-round-trips, but no rendered CSS, no clicking through the recurring modal, no visual
-check of the disclosure/progress-bar-removal layout). The owner is handling this
-pass themselves.
+1. The 2026-07-04 batch — capture bar, psych-field collapse, source citations,
+   connection engine v1, recurring tasks, the tech-debt/timezone/`db_push` fixes, and
+   the two RAG bug fixes described above.
+2. The 2026-07-06 Supabase migration — `db.py` (psycopg2 + `_PGConnection` shim),
+   `services/rag/store.py` (full pgvector rewrite), the new
+   `services/vault/storage.py` module, every vault read/write call site in `app.py`/
+   `processor.py`/`service.py`, `services/ai/budget.py` (Postgres-backed rolling
+   window), `services/rag/chunker.py`/`indexer.py` (bytes-based, Storage-driven),
+   deletion of `services/rag/watcher.py`, the `INSERT OR REPLACE`→`ON CONFLICT` and
+   `datetime`→`.isoformat()` fixes in `classes/Task.py`/`classes/Project.py`, the
+   `rag_test.py`/`connection_test.py` fixture rewrites, a rotated API test key, and
+   new files `supabase_setup.sql`, `api/index.py`, `vercel.json`.
+
+`git status --short` currently shows ~20 modified files, one deletion
+(`services/rag/watcher.py`), and 4 new paths (`api/`, `services/vault/storage.py`,
+`supabase_setup.sql`, `vercel.json`). No destructive git operations have been run.
+Check `git status`/`git diff` before assuming `HEAD` reflects current functionality
+— it doesn't; `HEAD` is still on plain SQLite/ChromaDB/local-disk.
+
+**Not yet done, flagged explicitly:** the 2026-07-04 batch has not been exercised in
+a real browser by an AI session (verification used `py_compile`, direct Python
+calls, and Flask's headless `test_client()` — no rendered CSS, no clicking through
+the recurring modal). The 2026-07-06 Supabase migration was verified more thoroughly
+end-to-end against the real Supabase project — every vault HTTP route through
+`test_client()`, `rag_test.py` (19/19), `connection_test.py` (6/6), `api_test.js`
+(29/29), and the budget guard's `BudgetExceededError` path — but an actual Vercel
+deploy has not been attempted; that's the one remaining unverified step (see "What
+Is Not Done" above). The owner is handling final browser verification and the
+Vercel deploy itself.
 
 ---
 
 ## Running Locally
 
+Requires a Supabase project (see "Stack" above for why) — create one, then run
+`supabase_setup.sql` once against it (Supabase's SQL Editor, or
+`psql "$DATABASE_URL" -f supabase_setup.sql`) to create the schema, enable the
+`vector`/`pgcrypto` extensions, and create the private `vault` Storage bucket.
+
 ```bash
 cp .env.example .env
 # Fill in FLASK_SECRET_KEY, GOOGLE_CLIENT_ID/SECRET, OWNER_EMAIL,
 # API_KEY_HASH (via gen_api_key.py), GEMINI_API_KEY, optionally
-# GROQ_API_KEY and AI_HOURLY_BUDGET
+# GROQ_API_KEY and AI_HOURLY_BUDGET, plus the Supabase trio:
+# DATABASE_URL (pooled connection string, port 6543), SUPABASE_URL,
+# SUPABASE_SECRET_KEY. FLASK_DEBUG defaults to false — only set it
+# true for local dev; never on anything reachable off localhost.
 
 python -m venv venv
 source venv/bin/activate
@@ -730,3 +889,19 @@ node api_test.js          # REST API suite (Node 18+, no deps); real API key har
                            # at the top of the file for local dev convenience — update
                            # it there too if you regenerate the key
 ```
+
+### Deploying to Vercel
+
+Groundwork is in place but not yet exercised against a real Vercel project (see
+"Working-Tree State" above):
+
+- `api/index.py` (`from app import app`) and `vercel.json` route every request to
+  it via `@vercel/python`.
+- Vercel imports `app` as a WSGI callable directly — `if __name__ == "__main__":`
+  never runs there, which is why `init_db(app)` was moved to module level in
+  `app.py` rather than left inside that block.
+- Set every `.env` variable above as a Vercel project env var, plus add
+  `https://<project>.vercel.app/authorize` as a second authorized redirect URI in
+  Google Cloud Console.
+- No app-level init/reindex step is needed on Vercel — Storage-backed vault content
+  already exists from prior indexing, unlike a fresh local clone's empty state.
