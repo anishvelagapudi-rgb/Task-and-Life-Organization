@@ -300,7 +300,7 @@ let fcal;
 // ── FullCalendar init ───────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   fcal = new FullCalendar.Calendar(document.getElementById('calendar'), {
-    initialView: 'dayGridMonth',
+    initialView: 'timeGridWeek',
     headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay' },
     height: '100%',
     selectable: true,
