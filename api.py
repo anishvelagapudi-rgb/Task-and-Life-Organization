@@ -108,6 +108,11 @@ def upsert_task():
         updates = {k: v for k, v in data.items() if k in TASK_FIELDS}
         if not updates:
             return jsonify({"error": "No valid fields to update"}), 400
+        # ai_generated is stored as INTEGER 0/1 (see supabase_setup.sql); a JSON
+        # boolean from the caller would otherwise hit psycopg2's native bool
+        # adapter and fail with a DatatypeMismatch against the integer column.
+        if "ai_generated" in updates:
+            updates["ai_generated"] = int(bool(updates["ai_generated"]))
 
         enforce_recurring_invariant(updates, existing_row["recurring"])
         updates["updated_at"] = ts
@@ -130,6 +135,8 @@ def upsert_task():
         fields.setdefault("status", "inbox")
         fields.setdefault("priority", "medium")
         fields.setdefault("source_type", "external")
+        if "ai_generated" in fields:
+            fields["ai_generated"] = int(bool(fields["ai_generated"]))
         enforce_recurring_invariant(fields)
         new_id = str(uuid.uuid4())
         fields["id"] = new_id

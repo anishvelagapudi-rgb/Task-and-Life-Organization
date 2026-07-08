@@ -81,7 +81,7 @@ class Task:
             "project_id": self.project_id,
             "parent_task_id": self.parent_task_id,
             "source_type": self.source_type,
-            "ai_generated": self.ai_generated,
+            "ai_generated": int(self.ai_generated),
             "source_uid": self.source_uid,
             "source_calendar_id": self.source_calendar_id,
             "tags": json.dumps(self.tags),
