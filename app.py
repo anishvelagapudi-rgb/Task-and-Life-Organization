@@ -15,7 +15,7 @@ from classes.Project import Project
 from api import api_bp
 from ai_routes import ai_bp
 from services.ai.gemini_provider import GeminiProvider
-from services.ai.service import AIService, strip_pending_delete_marker
+from services.ai.service import AIService, strip_pending_delete_marker, has_pending_delete_marker
 from services.ai.budget import BudgetExceededError
 from authlib.integrations.flask_client import OAuth
 import uuid
@@ -660,6 +660,12 @@ def chat_message(chat_id):
         return json.dumps({"error": "Chat not found"}), 404, {"Content-Type": "application/json"}
 
     data = request.get_json(force=True) or {}
+    if data.get("content") is not None and not isinstance(data.get("content"), str):
+        logger.warning(
+            "DEBUG_BADBODY content=%r headers=%r raw_body=%r",
+            data.get("content"), dict(request.headers), request.get_data(as_text=True)[:2000],
+        )
+        return json.dumps({"error": "content must be a string"}), 400, {"Content-Type": "application/json"}
     content = (data.get("content") or "").strip()
     client_tz = data.get("timezone")
     if not content:
@@ -713,8 +719,14 @@ def chat_message(chat_id):
 
     # `reply` (stored above, raw) intentionally keeps any [ref: ...] marker so the
     # confirmation round trip survives in chat_messages/history — only what's actually
-    # shown to the user here gets it stripped.
-    return json.dumps({"reply": strip_pending_delete_marker(reply), "sources": sources}), 200, {"Content-Type": "application/json"}
+    # shown to the user here gets it stripped. `pending_delete` lets the frontend show
+    # a real confirm dialog for this turn instead of a plain chat bubble, without ever
+    # exposing the marker itself to the browser.
+    return json.dumps({
+        "reply": strip_pending_delete_marker(reply),
+        "sources": sources,
+        "pending_delete": has_pending_delete_marker(reply),
+    }), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/chat/<chat_id>/save", methods=["POST"])

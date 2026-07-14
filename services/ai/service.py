@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import dateparser
 from dateparser.search import search_dates
 
-from db import enforce_recurring_invariant
+from db import enforce_recurring_invariant, enforce_no_self_parent
 from .provider import AIProvider
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,8 @@ events (editable) and Google Calendar events tagged "(Google, read-only)". Answe
 from that block; you have no tool to fetch Google Calendar yourself, so never call a tool
 to check it and never claim you lack access to it.
 Use list_events to look up local events beyond the injected 14-day window. Use create_event
-to add new events to LOCAL calendars only. Use update_event to modify existing local events.
+to add new events to LOCAL calendars only. Use update_event to modify, and delete_event to
+remove, existing local events.
 You cannot create, update, or delete Google Calendar events — if the user asks you to, tell
 them it's read-only from here and to use Google Calendar directly.
 When creating an event, prefer a calendar_id from the LOCAL CALENDARS list injected into
@@ -117,10 +118,17 @@ IMPORTANT RULES:
 - You ALWAYS have full access to the local calendar, and Google Calendar data is already injected into context when relevant. Never say you lack calendar access, cannot access the calendar (local or Google), or need permission. If a user asks about their calendar, use the UPCOMING EVENTS block already in context, or call list_events for local events beyond that window — do not refuse.
 - You ALWAYS have every one of the user's tasks (every status — inbox, active, done, blocked, archived) already injected into context as a CURRENT TASKS block. There is no separate tool for listing tasks — when asked to list, show, count, or summarize tasks, answer directly from that block. Never say you're unable to list tasks, lack access to them, or ask what to name a task when the user is asking to see existing tasks rather than create one.
 - Never create a task, project, event, or note as a substitute for answering a listing/query request you're unsure how to fulfill. If you don't have a tool for what's being asked, say so plainly instead of taking an unrelated action.
+- Never ask the user to supply a task/project/event ID, under any circumstances, for any single-item or multi-item request. You already have every task's id/title/status and every project's id/title/status in the CURRENT TASKS/CURRENT PROJECTS blocks below, and events are one list_events call away — resolve which item(s) a name refers to yourself by matching against those. Asking a person to look up and paste back an internal database ID is never an acceptable substitute for you doing that lookup.
+- The ONLY time you should ask the user a clarifying question before acting on a named reference (e.g. "add a subtask to my English Class HW", "mark the dentist appointment done") is when that name genuinely matches more than one existing item and you cannot tell which one is meant from context. In that case, ask by describing the candidates in plain language (title, status, due date, project) so the user can pick — never by asking for an ID, and never as a reflexive first step when there's really only one plausible match.
 
-BULK OR AMBIGUOUS TASK REFERENCES ("all tasks", "all inbox tasks", "these three", "the ones I completed today"):
-- You already have every task's id, title, and status in the CURRENT TASKS block. Never ask the user to supply task IDs — resolve which tasks are meant yourself from that block.
-- For any bulk action (updating or deleting more than one task), just call the tool once per matching task — do not ask the user for confirmation yourself and do not hold back the calls. A system-level safeguard automatically intercepts any request that would delete more than one task and asks the user to confirm before anything is actually removed, so you don't need to do this yourself — attempting the delete_task calls normally is the correct behavior even for "delete all tasks".
+BULK OR AMBIGUOUS REFERENCES ("all tasks", "all inbox tasks", "these three", "the ones I completed today", "add these 5 tasks", "all my projects"):
+- Creating multiple items in one message (e.g. "add tasks A, B, and C" or "create 5 tasks for my trip") is not a bulk-delete situation — just call create_task/create_event once per item in the same turn, back to back, with no confirmation step and no asking one at a time.
+- For any bulk action that updates more than one task, just call update_task once per matching task — do not ask for confirmation yourself and do not hold back the calls.
+- delete_tasks_matching ONLY applies when the request is about deleting TASKS. Call it when tasks are referred to by a shared keyword/prefix in the title ("all tasks that start with TEST", "every task with 'draft' in the title") or by blanket task scope ("delete all my tasks", "delete all tasks") — call it ONCE with that pattern (or match_type "all" for the blanket-task case) instead of picking matching tasks out yourself, and do not also call delete_task for the same items. Picking matches out of the CURRENT TASKS block yourself is unreliable on longer lists and can silently miss real matches; delete_tasks_matching resolves matches server-side and cannot miss one.
+- CRITICAL — do not let delete_tasks_matching leak into requests about a different resource type: "delete all projects" means projects only, "delete all events" means events only. The noun after "all"/"my" is what determines scope — only call delete_tasks_matching when that noun is "tasks" (or the request is unambiguously about tasks). A request to delete all projects must call delete_project per project and must NOT also call delete_tasks_matching — tasks were never mentioned and must not be touched, even though both requests start with the same "delete all ___" shape.
+- Only fall back to calling delete_task individually per task when the user names distinct tasks by their own separate titles (e.g. "delete 'Buy milk' and 'Pay rent'") — there's no shared pattern to give delete_tasks_matching there.
+- For deleting multiple PROJECTS or EVENTS on their own, or a mix of tasks/projects/events the user explicitly names together, call delete_project/delete_event/delete_task once per matching item — do not ask the user for confirmation yourself and do not hold back the calls.
+- A system-level safeguard automatically intercepts any request (via delete_task, delete_tasks_matching, delete_project, and/or delete_event, in any combination) that would delete more than one item total and asks the user to confirm before anything is actually removed, so you don't need to ask for confirmation yourself — attempting the delete calls normally is the correct behavior even for "delete all tasks" or "delete all my projects".
 """
 
 TOOLS = [
@@ -159,6 +167,7 @@ TOOLS = [
                     "ambiguity_level":  {"type": "integer", "minimum": 1, "maximum": 5},
                     "estimated_effort": {"type": "integer", "description": "Minutes"},
                     "recurring":        {"type": "string", "enum": ["daily", "weekly"], "description": "Only for repeating habits/chores. Never combine with due_date."},
+                    "parent_task_id":   {"type": "string", "description": "id of an existing task to nest this one under as a subtask. Omit for a root-level task."},
                     "psych_reasoning":  {
                         "type": "string",
                         "description": (
@@ -170,6 +179,23 @@ TOOLS = [
                     },
                 },
                 "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_project",
+            "description": "Update one or more fields on an existing project (rename, change description, or change status).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id":          {"type": "string"},
+                    "title":       {"type": "string"},
+                    "description": {"type": "string"},
+                    "status":      {"type": "string", "enum": ["active", "paused", "done"]},
+                },
+                "required": ["id"],
             },
         },
     },
@@ -204,6 +230,44 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "delete_tasks_matching",
+            "description": (
+                "Delete every task whose title matches a text pattern — matched "
+                "server-side against every task, not by you picking matches out of the "
+                "CURRENT TASKS block yourself. Use this whenever the user refers to a "
+                "group of tasks by a shared keyword/prefix or by blanket scope, rather "
+                "than by naming distinct individual titles — e.g. \"delete all tasks "
+                "that start with TEST\", \"delete all my SMOKETEST tasks\", \"remove "
+                "every task with 'draft' in the title\", \"delete all my tasks\". Still "
+                "goes through the same confirmation step as any other multi-item delete "
+                "before anything is actually removed — call this once and stop; do not "
+                "also call delete_task for the same items."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text to match against task titles, case-insensitive. Not required when match_type is \"all\".",
+                    },
+                    "match_type": {
+                        "type": "string",
+                        "enum": ["contains", "starts_with", "all"],
+                        "description": (
+                            "\"starts_with\" for \"begins with X\"/\"prefixed X\" phrasing, "
+                            "\"contains\" (default) for \"has X in the title\"/generic keyword "
+                            "phrasing, \"all\" for literally every task (\"delete all my "
+                            "tasks\", \"delete everything\") — pattern is ignored when \"all\"."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_task",
             "description": "Update one or more fields on an existing task. Use this to reprioritize, reschedule, or change the status of a task.",
             "parameters": {
@@ -221,6 +285,7 @@ TOOLS = [
                     "ambiguity_level":  {"type": "integer", "minimum": 1, "maximum": 5},
                     "estimated_effort": {"type": "integer", "description": "Minutes"},
                     "recurring":        {"type": "string", "enum": ["daily", "weekly"], "description": "Only for repeating habits/chores. Never combine with due_date."},
+                    "parent_task_id":   {"type": "string", "description": "id of an existing task to nest this one under as a subtask. Set to make this task a subtask of another."},
                     "psych_reasoning":  {
                         "type": "string",
                         "description": (
@@ -348,6 +413,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "delete_event",
+            "description": "Permanently delete an event from a local calendar by ID. Only works on local events, never on Google Calendar (read-only).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_note",
             "description": (
                 "Create a new markdown note in the AI-generated vault. "
@@ -409,10 +488,12 @@ _EVENT_WRITE_FIELDS = {
     "all_day", "location", "calendar_id",
 }
 
+_PROJECT_WRITE_FIELDS = {"title", "description", "status"}
+
 _TASK_WRITE_FIELDS = {
     "title", "description", "priority", "status", "energy_type",
     "due_date", "project_id", "fear_level", "ambiguity_level", "estimated_effort",
-    "psych_reasoning", "recurring",
+    "psych_reasoning", "recurring", "parent_task_id",
 }
 
 _CALENDAR_WORDS = re.compile(
@@ -483,44 +564,89 @@ def _is_affirmative(text: str) -> bool:
     return normalized in _AFFIRM_PHRASES or bool(_AFFIRM_DELETE_RE.match(normalized))
 
 
-# [ref: id,id,...|hmac] — the hmac binds the id list to this server process (keyed off
-# FLASK_SECRET_KEY) so the marker can't be forged by untrusted text the model might
-# reproduce verbatim from an indirect prompt-injection source (e.g. a malicious vault
-# note pulled in via passive RAG/search_vault/read_document). Without this, any
-# assistant-role text ending in a bracket pattern that merely *looks* like a pending
-# delete, followed by an unrelated affirmative user reply, could otherwise be read as
-# genuine confirmation and delete real tasks with no tool-calling round at all.
+# Every delete-capable tool shares one confirmation gate, keyed by a "kind" prefix
+# (task/project/event) rather than one gate per tool — "delete all tasks" and "delete
+# all projects" are the same failure mode (see the original incident this whole
+# mechanism exists for), so a tool added later that deletes something is a one-line
+# addition here, not a parallel gate to remember to build.
+_DELETE_TOOL_KIND = {"delete_task": "task", "delete_project": "project", "delete_event": "event"}
+_KIND_TO_DELETE_TOOL = {v: k for k, v in _DELETE_TOOL_KIND.items()}
+_KIND_LABEL = {"task": "tasks", "project": "projects", "event": "events"}
+_KIND_LABEL_SINGULAR = {"task": "task", "project": "project", "event": "event"}
+
+
+def _kind_label(kind: str, count: int) -> str:
+    return _KIND_LABEL_SINGULAR[kind] if count == 1 else _KIND_LABEL[kind]
+
+
+def _resolve_pattern_tasks(tasks: list[dict], pattern: str, match_type: str) -> list[dict]:
+    """Deterministic, exhaustive title matching against every task — the server-side
+    resolver behind delete_tasks_matching, built specifically so completeness never
+    depends on a model correctly recalling every match from the CURRENT TASKS text
+    block. Verified empirically: asked to delete "all tasks that begin with TEST"
+    across a 13-task list, the model picked 11 and silently dropped 2 — a plain Python
+    scan over the same rows this function receives cannot skip a row the way skimming a
+    long serialized block can. Case-insensitive; `tasks` is the same full (every status)
+    list already loaded once per chat() call for the CURRENT TASKS block, so this adds
+    no extra query."""
+    if match_type == "all":
+        return list(tasks)
+    needle = (pattern or "").strip().lower()
+    if not needle:
+        return []
+    if match_type == "starts_with":
+        return [t for t in tasks if t["title"].lower().startswith(needle)]
+    return [t for t in tasks if needle in t["title"].lower()]
+
+# [ref: kind:id,kind:id,...|hmac] — the hmac binds the (kind, id) list to this server
+# process (keyed off FLASK_SECRET_KEY) so the marker can't be forged by untrusted text
+# the model might reproduce verbatim from an indirect prompt-injection source (e.g. a
+# malicious vault note pulled in via passive RAG/search_vault/read_document). Without
+# this, any assistant-role text ending in a bracket pattern that merely *looks* like a
+# pending delete, followed by an unrelated affirmative user reply, could otherwise be
+# read as genuine confirmation and delete real data with no tool-calling round at all.
 _PENDING_DELETE_REF_RE = re.compile(
-    r"\[ref:\s*([0-9a-fA-F-]+(?:,[0-9a-fA-F-]+)*)\|([0-9a-f]+)\]\s*$"
+    r"\[ref:\s*([a-z]+:[0-9a-fA-F-]+(?:,[a-z]+:[0-9a-fA-F-]+)*)\|([0-9a-f]+)\]\s*$"
 )
 
 
-def _sign_delete_ids(ids: list[str]) -> str:
+def _sign_delete_refs(refs: list[str]) -> str:
     key = os.environ.get("FLASK_SECRET_KEY", "").encode()
-    return hmac.new(key, ",".join(ids).encode(), hashlib.sha256).hexdigest()[:24]
+    return hmac.new(key, ",".join(refs).encode(), hashlib.sha256).hexdigest()[:24]
 
 
 def strip_pending_delete_marker(text: str) -> str:
     """Public helper for callers (app.py's browser chat route) that persist/display AI
     replies — strips the internal [ref: ...] marker from what's shown to the user while
     leaving the raw text (marker included) as what's actually stored/round-tripped, since
-    _pending_bulk_delete_ids needs the marker to survive in conversation history for the
+    _pending_bulk_delete_refs needs the marker to survive in conversation history for the
     confirmation flow to work."""
     return _PENDING_DELETE_REF_RE.sub("", text or "").rstrip()
 
 
-def _pending_bulk_delete_ids(messages: list[dict]) -> list[str] | None:
+def has_pending_delete_marker(text: str) -> bool:
+    """Public helper so callers can tell a bulk-delete confirmation reply apart from an
+    ordinary one *without* re-exposing the raw [ref: ...] marker itself (which stays
+    server-side only, per strip_pending_delete_marker). Lets a frontend show something
+    more prominent than a plain chat bubble — a real confirm dialog — for exactly the
+    turn where a "confirm"/"cancel" reply actually matters, while the already-stripped
+    reply text (the human-readable "This will permanently delete N ..." sentence) is
+    reused as-is for that dialog's message, so there's no duplicated formatting logic."""
+    return bool(_PENDING_DELETE_REF_RE.search(text or ""))
+
+
+def _pending_bulk_delete_refs(messages: list[dict]) -> list[tuple[str, str]] | None:
     """Detects the second half of a bulk-delete confirmation round trip. Deliberately
     stateless (mirrors the rest of this module/ai_routes.py's stateless design) — the
-    "pending" state lives entirely in the signed [ref: id,id,...|hmac] marker this
-    module itself appended to its own prior confirmation reply, which the client resends
-    verbatim as part of `messages`. Only fires on an exact affirmative reply immediately
-    following a marker with a valid signature — see _confirm_bulk_delete_reply for where
-    the marker is produced, and the multi-delete_task interception in chat() below for
-    why this exists: the model cannot be trusted to reliably hold off on calling
-    delete_task itself for a bulk request (verified empirically — Gemini 2.5 Flash Lite
+    "pending" state lives entirely in the signed [ref: kind:id,kind:id,...|hmac] marker
+    this module itself appended to its own prior confirmation reply, which the client
+    resends verbatim as part of `messages`. Only fires on an exact affirmative reply
+    immediately following a marker with a valid signature — see _confirm_bulk_delete_reply
+    for where the marker is produced, and the multi-delete interception in chat() below
+    for why this exists: the model cannot be trusted to reliably hold off on calling a
+    delete tool itself for a bulk request (verified empirically — Gemini 2.5 Flash Lite
     executed a 2-task delete immediately despite explicit prompt instructions to ask
-    first)."""
+    first). Returns a list of (kind, id) pairs."""
     if len(messages) < 2:
         return None
     last, prev = messages[-1], messages[-2]
@@ -531,26 +657,76 @@ def _pending_bulk_delete_ids(messages: list[dict]) -> list[str] | None:
     m = _PENDING_DELETE_REF_RE.search(prev.get("content") or "")
     if not m:
         return None
-    ids, sig = m.group(1).split(","), m.group(2)
-    if not hmac.compare_digest(_sign_delete_ids(ids), sig):
+    raw_refs, sig = m.group(1).split(","), m.group(2)
+    if not hmac.compare_digest(_sign_delete_refs(raw_refs), sig):
         return None
-    return ids
+    refs = []
+    for ref in raw_refs:
+        kind, _, id_ = ref.partition(":")
+        if kind not in _KIND_TO_DELETE_TOOL or not id_:
+            return None
+        refs.append((kind, id_))
+    return refs
 
 
-def _confirm_bulk_delete_reply(tasks_by_id: dict, ids: list[str]) -> str:
-    """Builds the confirmation prompt for a would-be multi-task delete, ending in a
-    signed [ref: ...] marker that _pending_bulk_delete_ids parses back out and verifies
-    on the user's next turn. Only ids that actually resolve to a real, currently-existing
-    task are included — both in the displayed title list and in what gets signed/deleted
+def _resolve_delete_title(db, kind: str, id_: str, tasks_by_id: dict, projects_by_id: dict) -> str | None:
+    if kind == "task":
+        return tasks_by_id.get(id_, {}).get("title")
+    if kind == "project":
+        return projects_by_id.get(id_, {}).get("title")
+    row = db.execute("SELECT title FROM events WHERE id = ?", (id_,)).fetchone()
+    return row["title"] if row else None
+
+
+def _confirm_bulk_delete_reply(
+    db, tasks_by_id: dict, projects_by_id: dict, refs: list[tuple[str, str]]
+) -> str:
+    """Builds the confirmation prompt for a would-be multi-item delete, ending in a
+    signed [ref: ...] marker that _pending_bulk_delete_refs parses back out and verifies
+    on the user's next turn. Only refs that actually resolve to a real, currently-existing
+    row are included — both in the displayed title list and in what gets signed/deleted
     on confirm — so the displayed count and titles always match exactly what confirming
-    would do, and a stale/bogus id can't sneak into the marker."""
-    resolved = [i for i in ids if i in tasks_by_id]
-    titles = [f'"{tasks_by_id[i]["title"]}"' for i in resolved]
-    sig = _sign_delete_ids(resolved)
+    would do, and a stale/bogus id can't sneak into the marker.
+
+    When the resolved set spans more than one kind, the message groups by kind
+    ("13 tasks and 6 projects") instead of a single flat "19 items" count/list —
+    surfaced by testing: a request scoped to only one kind ("delete all projects") can
+    still incorrectly resolve items of another kind too (a prompt-adherence failure,
+    not something this function can prevent), and a flat undifferentiated list makes
+    that kind of scope leak easy to skim past. Grouping by kind is a second, independent
+    layer behind the prompt fix — the confirmation gate is exactly the place a human
+    catches a wrong proposed scope before anything is actually deleted, so making the
+    wrongness visible here matters as much as making the model less likely to do it."""
+    resolved = []
+    by_kind: dict[str, list[str]] = {}
+    for kind, id_ in refs:
+        title = _resolve_delete_title(db, kind, id_, tasks_by_id, projects_by_id)
+        if title is None:
+            continue
+        resolved.append((kind, id_))
+        by_kind.setdefault(kind, []).append(title)
+    sig_refs = [f"{kind}:{id_}" for kind, id_ in resolved]
+    sig = _sign_delete_refs(sig_refs)
+
+    if len(by_kind) <= 1:
+        kind = next(iter(by_kind)) if by_kind else None
+        noun = _kind_label(kind, len(resolved)) if kind else "items"
+        titles = [f'"{t}"' for titles in by_kind.values() for t in titles]
+        summary = f"{len(resolved)} {noun}: {', '.join(titles)}"
+    else:
+        breakdown = " and ".join(
+            f"{len(titles)} {_kind_label(kind, len(titles))}" for kind, titles in sorted(by_kind.items())
+        )
+        per_kind = "; ".join(
+            f"{_kind_label(kind, len(titles))} — " + ", ".join(f'"{t}"' for t in titles)
+            for kind, titles in sorted(by_kind.items())
+        )
+        summary = f"{len(resolved)} items ({breakdown}): {per_kind}"
+
     return (
-        f"This will permanently delete {len(resolved)} tasks: {', '.join(titles)}. "
+        f"This will permanently delete {summary}. "
         f'Reply "confirm" to proceed, or say anything else to cancel.\n\n'
-        f"[ref: {','.join(resolved)}|{sig}]"
+        f"[ref: {','.join(sig_refs)}|{sig}]"
     )
 
 
@@ -560,12 +736,14 @@ def _now() -> str:
 
 _TOOL_CONFIRM_VERBS = {
     "create_project": "Created project",
+    "update_project": "Updated project",
     "create_task": "Created task",
     "delete_project": "Deleted project",
     "delete_task": "Deleted task",
     "update_task": "Updated task",
     "create_event": "Created",
     "update_event": "Updated",
+    "delete_event": "Deleted event",
     "create_note": "Saved note",
 }
 
@@ -612,6 +790,17 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         db.commit()
         return {"success": True, "id": fields["id"], "title": args["title"]}
 
+    if name == "update_project":
+        project_id = args["id"]
+        updates = {k: v for k, v in args.items() if k in _PROJECT_WRITE_FIELDS}
+        if not updates:
+            return {"success": False, "error": "No valid fields to update"}
+        updates["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        cur = db.execute(f"UPDATE projects SET {set_clause} WHERE id = ?", [*updates.values(), project_id])
+        db.commit()
+        return {"success": cur.rowcount > 0, "id": project_id}
+
     if name == "delete_project":
         cur = db.execute("DELETE FROM projects WHERE id = ?", (args["id"],))
         db.commit()
@@ -629,6 +818,7 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             return {"success": False, "error": "No valid fields to update"}
         existing_row = db.execute("SELECT recurring, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         enforce_recurring_invariant(updates, existing_row["recurring"] if existing_row else None)
+        enforce_no_self_parent(updates, task_id)
         # completed_at isn't a model-writable field (see _TASK_WRITE_FIELDS) — derive it
         # from the status transition instead, mirroring app.py's update_task route. Without
         # this, the AI could mark a task 'done' with no completed_at ever set, which
@@ -702,6 +892,11 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         db.execute(f"UPDATE events SET {set_clause} WHERE id = ?", [*updates.values(), event_id])
         db.commit()
         return {"success": True, "id": event_id}
+
+    if name == "delete_event":
+        cur = db.execute("DELETE FROM events WHERE id = ?", (args["id"],))
+        db.commit()
+        return {"success": cur.rowcount > 0, "id": args["id"]}
 
     if name == "read_document":
         try:
@@ -1134,24 +1329,24 @@ CURRENT PROJECTS:
         tasks = [dict(r) for r in rows]
         tasks_by_id = {t["id"]: t for t in tasks}
 
-        # Second half of the bulk-delete confirmation round trip (see
-        # _pending_bulk_delete_ids) — resolved entirely deterministically, no model
-        # call needed, before any of the normal chat machinery below runs.
-        pending_ids = _pending_bulk_delete_ids(messages)
-        if pending_ids is not None:
-            deleted_titles = []
-            for tid in pending_ids:
-                title = tasks_by_id.get(tid, {}).get("title", tid)
-                result = _execute_tool(db, "delete_task", {"id": tid})
-                if result.get("success"):
-                    deleted_titles.append(title)
-            if deleted_titles:
-                return f"Deleted {len(deleted_titles)} tasks: {', '.join(deleted_titles)}.", []
-            return "Nothing was deleted — those tasks may already be gone.", []
-
         projects = db.execute("SELECT id, title, status FROM projects ORDER BY title").fetchall()
         projects_by_id = {p["id"]: dict(p) for p in projects}
         project_lines = "\n".join(f"  [{p['id']}] {p['title']} ({p['status']})" for p in projects) or "  None"
+
+        # Second half of the bulk-delete confirmation round trip (see
+        # _pending_bulk_delete_refs) — resolved entirely deterministically, no model
+        # call needed, before any of the normal chat machinery below runs.
+        pending_refs = _pending_bulk_delete_refs(messages)
+        if pending_refs is not None:
+            deleted_titles = []
+            for kind, id_ in pending_refs:
+                title = _resolve_delete_title(db, kind, id_, tasks_by_id, projects_by_id) or id_
+                result = _execute_tool(db, _KIND_TO_DELETE_TOOL[kind], {"id": id_})
+                if result.get("success"):
+                    deleted_titles.append(title)
+            if deleted_titles:
+                return f"Deleted {len(deleted_titles)}: {', '.join(deleted_titles)}.", []
+            return "Nothing was deleted — those may already be gone.", []
 
         calendars = db.execute("SELECT id, name FROM calendars ORDER BY name").fetchall()
         cal_lines = "\n".join(f"  [{c['id']}] {c['name']}" for c in calendars) or "  None"
@@ -1299,25 +1494,77 @@ remove one.]"""
         # was actually grounded in.
         used_sources: list[dict] = []
         tool_round_happened = False
-        # Tracks task ids actually deleted so far across ALL rounds of this single
-        # chat() call — the gate below is cumulative, not per-round, specifically so a
-        # model can't bypass confirmation by spreading a bulk delete across multiple
-        # single-item rounds (each individually under the per-round threshold).
-        executed_delete_ids: list[str] = []
+        # Tracks (kind, id) pairs actually deleted so far across ALL rounds of this
+        # single chat() call — the gate below is cumulative, not per-round, specifically
+        # so a model can't bypass confirmation by spreading a bulk delete across
+        # multiple single-item rounds (each individually under the per-round threshold),
+        # and cumulative *across* delete tools too (2 tasks + 1 project in one turn is
+        # still 3 deletions).
+        executed_delete_refs: list[tuple[str, str]] = []
         for _ in range(5):
             reply_text, tool_calls = self.provider.chat_with_tools(system, internal, TOOLS)
 
-            # Intercept a delete_task set before executing anything if it would push
-            # this turn's total deletions past 1, regardless of what the model's own
-            # reply_text says it's going to do — do not trust the model to hold off on
-            # the delete_task calls itself (see _pending_bulk_delete_ids docstring for
-            # why this is enforced in code rather than by prompt alone). Any non-delete
-            # calls in the same round still execute normally so a compound request
-            # ("delete A and B, and add C") doesn't silently drop the C part.
-            delete_calls = [tc for tc in tool_calls if tc["name"] == "delete_task"]
-            other_calls = [tc for tc in tool_calls if tc["name"] != "delete_task"]
-            pending_ids = [tc["arguments"]["id"] for tc in delete_calls]
-            if pending_ids and len(executed_delete_ids) + len(pending_ids) > 1:
+            # delete_tasks_matching is a deterministic macro, not something _execute_tool
+            # knows how to run directly — expand it here into literal delete_task calls
+            # with ids resolved by _resolve_pattern_tasks (exhaustive server-side
+            # matching), before any gate/execution logic below ever sees it. Everything
+            # downstream (the confirmation gate, per-call execution, title backfill)
+            # then handles these exactly like delete_task calls the model wrote itself,
+            # so completeness comes from Python's matching, not the model's recall.
+            # Deduped against any ids already present (from this or another pattern
+            # call, or an explicit delete_task in the same round) so overlapping
+            # patterns/calls can't double-count the same task in the confirmation.
+            if any(tc["name"] == "delete_tasks_matching" for tc in tool_calls):
+                seen_ids = {tc["arguments"]["id"] for tc in tool_calls if tc["name"] == "delete_task"}
+                # match_type="all" bundled into the same round as a delete_project/
+                # delete_event call is treated as a mistake, not a legitimate compound
+                # request, and is dropped rather than expanded — enforced here in code
+                # because a prompt-only warning against it (see BULK OR AMBIGUOUS
+                # REFERENCES above) did NOT reliably prevent it: verified empirically,
+                # asked to "delete all projects" with no mention of tasks at all, the
+                # model still called delete_tasks_matching(match_type="all") alongside
+                # delete_project once per project, which would have silently wiped
+                # every task too as an undocumented side effect. A genuine "wipe both
+                # my tasks and my projects" request just needs two separate turns.
+                blanket_all_unsafe = any(tc["name"] in ("delete_project", "delete_event") for tc in tool_calls)
+                expanded, no_match_notes = [], []
+                for tc in tool_calls:
+                    if tc["name"] != "delete_tasks_matching":
+                        expanded.append(tc)
+                        continue
+                    pattern = tc["arguments"].get("pattern")
+                    match_type = tc["arguments"].get("match_type", "contains")
+                    if match_type == "all" and blanket_all_unsafe:
+                        continue
+                    matches = _resolve_pattern_tasks(tasks, pattern, match_type)
+                    if not matches:
+                        no_match_notes.append(f'No tasks matched "{pattern}".' if pattern else "No tasks matched.")
+                        continue
+                    for t in matches:
+                        if t["id"] in seen_ids:
+                            continue
+                        seen_ids.add(t["id"])
+                        expanded.append({
+                            "call_id": f"{tc['call_id']}_{t['id']}",
+                            "name": "delete_task",
+                            "arguments": {"id": t["id"]},
+                        })
+                tool_calls = expanded
+                if not tool_calls and no_match_notes:
+                    return " ".join(no_match_notes), []
+
+            # Intercept any delete_task/delete_project/delete_event set before executing
+            # anything if it would push this turn's total deletions past 1, regardless
+            # of what the model's own reply_text says it's going to do — do not trust
+            # the model to hold off on the delete calls itself (see
+            # _pending_bulk_delete_refs docstring for why this is enforced in code
+            # rather than by prompt alone). Any non-delete calls in the same round still
+            # execute normally so a compound request ("delete A and B, and add C")
+            # doesn't silently drop the C part.
+            delete_calls = [tc for tc in tool_calls if tc["name"] in _DELETE_TOOL_KIND]
+            other_calls = [tc for tc in tool_calls if tc["name"] not in _DELETE_TOOL_KIND]
+            pending_refs = [(_DELETE_TOOL_KIND[tc["name"]], tc["arguments"]["id"]) for tc in delete_calls]
+            if pending_refs and len(executed_delete_refs) + len(pending_refs) > 1:
                 side_replies = []
                 for tc in other_calls:
                     result = _execute_tool(db, tc["name"], tc["arguments"])
@@ -1330,13 +1577,26 @@ remove one.]"""
                         for c in result["connections"]:
                             used_sources.append({"source": c["target"], "heading": ""})
                     side_replies.append(_synthesize_tool_confirmation(tc["name"], tc["arguments"], result))
-                confirm_reply = _confirm_bulk_delete_reply(tasks_by_id, pending_ids)
+                confirm_reply = _confirm_bulk_delete_reply(db, tasks_by_id, projects_by_id, pending_refs)
                 reply = "\n".join(side_replies + [confirm_reply]) if side_replies else confirm_reply
                 return reply, _dedupe_sources(used_sources)
 
             if not tool_calls:
                 if reply_text:
                     sources = used_sources if tool_round_happened else _chunks_to_sources(passive_chunks)
+                    # Verify against the actual tool results rather than trusting the
+                    # model's own phrasing at face value — on a multi-item write round
+                    # (e.g. bulk create/update), a model that glosses over one failed
+                    # call among several successes would otherwise leave the user
+                    # thinking everything went through. Only appends when something in
+                    # the round actually failed; never overrides a genuinely clean reply.
+                    failures = [(n, a, r) for n, a, r in last_tool_results if not r.get("success", True)]
+                    if failures:
+                        fail_note = " ".join(
+                            f'"{a.get("title") or a.get("id", "")}" failed ({r.get("error", "unknown error")}).'
+                            for n, a, r in failures
+                        )
+                        reply_text = f"{reply_text}\n\nNote: {fail_note}"
                     return reply_text, _dedupe_sources(sources)
                 if last_tool_results:
                     reply = "\n".join(
@@ -1475,17 +1735,43 @@ remove one.]"""
 
             last_tool_results = []
             for tc in tool_calls:
+                # Delete-tool results only ever carry an id, never a title —
+                # _synthesize_tool_confirmation would otherwise show the raw UUID to the
+                # user. Resolved *before* executing (not backfilled after) because
+                # delete_event's title lives only in the row itself, which is gone the
+                # instant the delete succeeds — tasks/projects use the preloaded dicts
+                # above so are unaffected either way, but events need the pre-image.
+                pre_delete_title = None
+                if tc["name"] in _DELETE_TOOL_KIND:
+                    pre_delete_title = _resolve_delete_title(
+                        db, _DELETE_TOOL_KIND[tc["name"]], tc["arguments"].get("id"), tasks_by_id, projects_by_id
+                    )
                 result = _execute_tool(db, tc["name"], tc["arguments"])
-                # delete_task/delete_project results only ever carry an id, never a
-                # title — _synthesize_tool_confirmation would otherwise show the raw
-                # UUID to the user. Backfill from the pre-deletion lookups above.
-                if result.get("success") and "title" not in result:
-                    if tc["name"] == "delete_task":
-                        result["title"] = tasks_by_id.get(tc["arguments"].get("id"), {}).get("title")
-                    elif tc["name"] == "delete_project":
-                        result["title"] = projects_by_id.get(tc["arguments"].get("id"), {}).get("title")
-                if tc["name"] == "delete_task" and result.get("success"):
-                    executed_delete_ids.append(tc["arguments"]["id"])
+                if result.get("success") and "title" not in result and tc["name"] in _DELETE_TOOL_KIND:
+                    result["title"] = pre_delete_title
+                if tc["name"] in _DELETE_TOOL_KIND and result.get("success"):
+                    executed_delete_refs.append((_DELETE_TOOL_KIND[tc["name"]], tc["arguments"]["id"]))
+                # update_task/update_project/update_event results carry only an id too.
+                # Same UUID-leak risk as the delete tools above (surfaced by testing: a
+                # status-only update — no new title in the call — fell through
+                # _synthesize_tool_confirmation's args.get("title") fallback straight to
+                # the raw id). Skipped when the call itself supplies a new title, so a
+                # rename shows the *new* name rather than being overwritten by the old
+                # one looked up here.
+                if (
+                    result.get("success")
+                    and "title" not in result
+                    and "title" not in tc["arguments"]
+                    and tc["name"] in ("update_task", "update_project", "update_event")
+                ):
+                    item_id = tc["arguments"].get("id")
+                    if tc["name"] == "update_task":
+                        result["title"] = tasks_by_id.get(item_id, {}).get("title")
+                    elif tc["name"] == "update_project":
+                        result["title"] = projects_by_id.get(item_id, {}).get("title")
+                    else:
+                        row = db.execute("SELECT title FROM events WHERE id = ?", (item_id,)).fetchone()
+                        result["title"] = row["title"] if row else None
                 last_tool_results.append((tc["name"], tc["arguments"], result))
                 if tc["name"] == "search_vault" and result.get("found"):
                     for c in result["chunks"]:

@@ -90,6 +90,30 @@ def enforce_recurring_invariant(fields: dict, existing_recurring: str | None = N
         fields["due_date"] = None
 
 
+def enforce_no_self_parent(fields: dict, task_id: str) -> None:
+    """A task can never be its own parent — silently drops parent_task_id from
+    `fields` if it equals the row's own id, consistent with how other invalid
+    values in this whitelist pattern are handled leniently elsewhere (see
+    enforce_recurring_invariant) rather than erroring the whole request.
+
+    Guards against a self-referential row causing an infinite loop in app.py's
+    parent-chain walk (`while cur.get('parent_task_id'): ...`, used to render the
+    subtask tree) — surfaced empirically: an AI model asked to "add a subtask to
+    X" sometimes calls update_task(id=X, parent_task_id=X) on the parent itself
+    instead of setting parent_task_id on the new child. Only guards direct
+    self-reference, not longer cycles (A→B→A) — those were already possible via
+    the REST API before parent_task_id was ever exposed to the AI and are a
+    separate, pre-existing gap, not something this specific fix is scoped to close.
+
+    Shared by api.py's REST endpoint and services/ai/service.py's AI tool executor,
+    same pattern as enforce_recurring_invariant. Mutates `fields` in place. Only
+    meaningful on UPDATE (task_id already exists) — on CREATE the new row's id
+    doesn't exist yet when fields are being built, so self-reference is structurally
+    impossible there."""
+    if fields.get("parent_task_id") == task_id:
+        fields["parent_task_id"] = None
+
+
 def init_db(app):
     """Schema is created once via supabase_setup.sql run directly against the
     Supabase project (see README) — Postgres isn't a per-boot local file, so there's

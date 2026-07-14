@@ -5,7 +5,7 @@ import httpx
 from flask import Blueprint, jsonify, request
 from db import get_db
 from services.ai.gemini_provider import GeminiProvider
-from services.ai.service import AIService
+from services.ai.service import AIService, has_pending_delete_marker
 
 ai_bp = Blueprint("ai", __name__, url_prefix="/api/ai")
 
@@ -63,4 +63,15 @@ def chat():
         reply, sources = _get_service().chat(get_db(), messages)
     except httpx.NetworkError:
         return jsonify({"error": "AI service unreachable"}), 503
-    return jsonify({"reply": reply, "sources": sources})
+    # `reply` intentionally keeps any internal [ref: ...] delete-confirmation marker,
+    # unlike app.py's browser route — this endpoint is stateless (see the docstring
+    # above), so the caller is what persists/replays message history between turns,
+    # and the marker has to survive in *their* copy for the confirmation round trip to
+    # work on their next call. `pending_delete` is provided as a convenience so a
+    # caller doesn't have to pattern-match the marker itself to know this reply needs a
+    # yes/no rather than being treated as a normal answer.
+    return jsonify({
+        "reply": reply,
+        "sources": sources,
+        "pending_delete": has_pending_delete_marker(reply),
+    })

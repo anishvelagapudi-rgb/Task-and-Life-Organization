@@ -277,8 +277,9 @@ that route's behavior is intentionally changed first.
   endpoint) intentionally keeps its own inbox/active-only filter — recommending a
   done task makes no sense there.
 - **Tools the AI can use:** `create_task`, `update_task`, `delete_task`,
-  `create_project`, `delete_project`, `read_document`, `search_vault`, `create_note`,
-  `list_events`, `create_event`, `update_event`, `find_connections`. Any new AI tool
+  `delete_tasks_matching`, `create_project`, `update_project`, `delete_project`,
+  `read_document`, `search_vault`, `create_note`, `list_events`, `create_event`,
+  `update_event`, `delete_event`, `find_connections`. Any new AI tool
   that returns vault/note content should follow the same single-tool-call shortcut
   pattern as `search_vault`/`read_document`/`list_events`/`find_connections` (bypass
   the tool-response round-trip, inject results via a fresh plain-chat call instead of
@@ -399,6 +400,206 @@ more robust fix would pre-filter the task list in Python by status when the
 message names one (deterministic, bypasses the model's status-reasoning
 entirely) rather than relying on prompt wording — revisit if this proves
 disruptive in practice.
+
+### Bulk delete — signed confirmation gate (2026-07-13)
+
+**Incident:** a user asked the chat AI to "delete all tasks." The model asked for
+task IDs one at a time instead of resolving them from its own already-injected task
+context; the user replied "all of them, just take each id and delete that"; the
+model then called `delete_task` once per task with no further confirmation,
+deleting every task with no way to undo it. Prompt-only instructions telling the
+model to ask before bulk-deleting are not reliable enough on their own — verified
+empirically, Gemini 2.5 Flash Lite executed a 2-task delete immediately despite an
+explicit system-prompt instruction to confirm first.
+
+That "asked for task IDs one at a time" step is itself a separate bug, independent
+of the missing confirmation gate: the model should never ask a person to look up
+and paste back an internal database ID — it already has every task's id/title in
+context and should resolve a name itself. Asking a clarifying question at all
+should only happen when a given name is genuinely ambiguous (matches more than one
+existing item), and even then by describing the candidates in plain language, never
+by requesting an ID. Fixed in the system prompt's `IMPORTANT RULES` (a general rule,
+not scoped to bulk/delete requests, since the same failure mode applies to any
+single-item reference-by-name too, e.g. "add a subtask to my English Class HW" when
+two tasks share a similar name) — this is prompt-only, not code-enforced, so unlike
+the confirmation gate above it carries the same reliability caveat as other
+prompt-level fixes in this file (see the task-listing and calendar quirks above).
+
+**Fix, enforced in code, not just prompt:** `chat()` tracks every `delete_task` /
+`delete_project` / `delete_event` call across all rounds of a single turn
+(cumulative, so a model can't dodge the gate by spreading a bulk delete across
+several single-item tool-calling rounds). The moment the running total would exceed
+1 deletion — in any combination across the three tools — execution stops before
+anything is deleted, and the reply becomes a confirmation prompt listing the exact
+resolved titles, e.g. `This will permanently delete 3 tasks: "Buy milk", "Pay rent",
+"Call mom". Reply "confirm" to proceed...`, ending in an internal
+`[ref: task:<id>,task:<id>,...|<hmac>]` marker (`strip_pending_delete_marker` hides
+it from what's actually shown to the user; the raw marker is what's persisted/
+round-tripped through chat history). The `hmac` is keyed off `FLASK_SECRET_KEY`, so
+a look-alike `[ref: ...]` string reproduced verbatim from an untrusted source (e.g.
+injected via a malicious vault note reachable through `search_vault`/
+`read_document`) can't be forged into a real confirmation. On the user's next
+message, `_pending_bulk_delete_refs` checks for an exact affirmative reply
+immediately following a validly-signed marker — only then are the referenced rows
+actually deleted, resolved fresh at that moment (a stale id whose row is already
+gone is silently skipped, not errored).
+
+The gate is generalized by a `kind` prefix (`task:`/`project:`/`event:`) rather than
+being task-specific, specifically so **any** future delete-capable tool is a
+one-line addition to `_DELETE_TOOL_KIND`, not a parallel confirmation mechanism to
+remember to build — `delete_project` had no gate at all until this fix (a live gap
+of the exact same shape as the original incident, just never exercised), and
+`delete_event` was added as a new tool with the gate already in place rather than
+bolted on afterward. **Creates remain intentionally ungated** — the prompt (system
+prompt's "BULK OR AMBIGUOUS REFERENCES" section) explicitly tells the model to batch
+multiple `create_task`/`create_event` calls in one turn with no per-item
+confirmation, since creation isn't destructive and gating it would just reintroduce
+the "asks for details one at a time" friction the original bulk-delete incident was
+adjacent to.
+
+**Two more bugs this fix's own smoke-testing surfaced, both fixed the same session:**
+- `update_task`/`update_project`/`update_event` results carried only an id, never a
+  title, same as the delete tools originally did — `_synthesize_tool_confirmation`'s
+  fallback (Gemini's 0-output-token quirk) would show the raw UUID to the user on a
+  status-only update with no new title in the call. Backfilled the same way the
+  delete tools are, skipped when the call itself supplies a new title (so a rename
+  shows the new name, not an old one looked up here).
+- `parent_task_id` (subtasks) was a real, writable column (`api.py`'s `TASK_FIELDS`,
+  the browser's subtask UI) with **zero** AI tool exposure — asking the AI to "add a
+  subtask to X" had no working path, so it improvised by asking the user for a task
+  ID instead of saying it couldn't do it (a second, independent source of the
+  ID-asking behavior above, this one caused by a missing tool rather than a
+  resolve-by-name failure). Added `parent_task_id` to `create_task`/`update_task`.
+  Doing so surfaced a *third* bug during live testing: asked to add a subtask, the
+  model sometimes calls `update_task(id=<parent>, parent_task_id=<parent>)` on the
+  parent itself instead of setting `parent_task_id` on the new child — a
+  self-referential row that would infinite-loop `app.py`'s parent-chain walk used to
+  render the subtask tree. Fixed with `enforce_no_self_parent()` in `db.py` (same
+  shared-invariant pattern as `enforce_recurring_invariant`, called from both
+  `api.py` and `service.py`) — silently drops `parent_task_id` when it equals the
+  row's own id rather than erroring. Only guards direct self-reference, not longer
+  cycles (A→B→A), which were already reachable via the REST API before
+  `parent_task_id` was ever AI-exposed and are a separate, pre-existing gap.
+
+### Bulk delete completeness — `delete_tasks_matching` (2026-07-14)
+
+**Incident:** asked to "delete all tasks that begin with TEST" against a 13-task
+list, the model correctly went through the confirmation gate above (no ID-asking,
+exact titles shown, nothing removed until confirmed) — but the *set it proposed* was
+wrong: it picked 11 of 13 matching tasks and silently dropped 2, one of them a
+`status:done` task. The gate can only ever be as complete as the set of ids it's
+handed; it has no way to know the model's enumeration undercounted.
+
+**Why "keep looping until the request is satisfied" doesn't fix this:** the failure
+is in *selection*, not *execution* — the model already terminated normally,
+considering the job done, having genuinely (if incorrectly) read through the task
+list once. A supervisory loop that re-checks "is my selection complete?" would have
+the same model re-skim the same long text block a second time — no more reliable
+than the first pass, and if it *does* catch a miss and autonomously issues more
+delete calls without a fresh confirmation, that's unattended repeated
+destructive action-taking, which is the opposite of what the confirmation gate above
+exists to prevent.
+
+**Actual fix:** stop asking the model to enumerate matches from memory at all. Before
+this, "delete all tasks matching X" meant the model read `CURRENT TASKS` and called
+`delete_task` once per item *it personally noticed* — reliability bounded by however
+well an LLM skims a serialized text block. `delete_tasks_matching(pattern,
+match_type)` instead asks the model only to state the *pattern* (`contains` /
+`starts_with` / `all` for literally every task) — a much simpler, lower-stakes
+classification than exhaustive enumeration — and `_resolve_pattern_tasks()` in
+`service.py` does the actual matching with a plain Python scan over the same full
+task list already loaded for the `CURRENT TASKS` block, which cannot skip a row the
+way skimming a long block can. The tool call is expanded into literal `delete_task`
+calls (with ids resolved server-side) before the round even reaches the confirmation
+gate/execution logic, so everything downstream — the signed-marker gate, per-call
+execution, title backfill — handles it exactly like `delete_task` calls the model
+wrote by hand; completeness comes from Python's matching, not model recall, but
+nothing about the confirm-before-delete safety property changes. `match_type: all`
+also closes the loop on the *original* "delete all tasks" incident this whole
+mechanism exists for — that phrasing has the identical enumeration-reliability
+exposure as a keyword pattern and now goes through the same deterministic path
+instead of the model hand-picking every id from a long list.
+
+Scoped to tasks only for now (`delete_projects_matching`/`delete_events_matching`
+would be a straightforward extension of the same pattern if bulk project/event
+deletion ever needs it — projects/events are typically far fewer per user, so the
+enumeration-miss risk that motivated this for tasks is much lower there today).
+
+Verified with a unit test of `_resolve_pattern_tasks` directly (contains vs.
+starts_with vs. all, case-insensitivity, empty/`None`/whitespace-only pattern,
+substring-boundary cases like "CONTEST" containing but not starting with "TEST")
+and a live end-to-end test: created a known 13-task batch (8 true positives + 3
+"contains but doesn't start with" decoys + 2 unrelated decoys), ran the delete
+through actual chat, and diffed the *exact id set* removed against the *exact id
+set* expected — not a spot check of a few expected items, but a full-list
+comparison proving nothing outside the intended set was touched.
+
+### `delete_tasks_matching(match_type="all")` scope leak (2026-07-14)
+
+**Incident:** asked to "Delete all projects" — no mention of tasks anywhere in the
+request — the model called `delete_project` once per project (correct) *and also*
+`delete_tasks_matching(match_type="all")` (not requested, not implied). The
+confirmation gate correctly intercepted the whole batch before anything was deleted
+and displayed all 19 resolved items, so nothing was actually lost — the user read
+the confirmation, noticed tasks were listed for a request that only mentioned
+projects, and stopped before confirming. But had they skimmed a flat 19-item list
+and confirmed, every task in the account would have been deleted as an undocumented
+side effect of a projects-only request.
+
+First fix attempt was prompt-only: an explicit `CRITICAL` rule added to `BULK OR
+AMBIGUOUS REFERENCES` stating that the noun after "all" determines scope and that
+`delete_tasks_matching` must never fire for a request about a different resource
+type. Re-tested against the identical "Delete all projects" request — **the model
+made the exact same mistake anyway.** Consistent with every other model-reliability
+finding in this file: a prompt instruction, however explicit, is not a substitute
+for a code-enforced invariant once the stakes are "could delete everything."
+
+**Actual fix, in code:** in `chat()`'s per-round tool-call handling, a
+`delete_tasks_matching(match_type="all")` call is dropped (not expanded into
+deletes) whenever the same round also contains a `delete_project` or `delete_event`
+call — the co-occurrence itself is the signal, no NLP/keyword-matching on the user's
+message required. Re-tested against the identical request post-fix: correctly
+resolves to project deletions only, zero tasks. A genuine "wipe both my tasks and my
+projects" request just needs two separate turns — an acceptable, rare cost for
+closing a scope-leak that could otherwise silently 10x the blast radius of an
+unrelated request.
+
+**Second, independent layer:** `_confirm_bulk_delete_reply()` now groups the
+confirmation message by kind ("19 items (13 tasks and 6 projects): tasks — ...;
+projects — ...") instead of one flat undifferentiated list, specifically so a wrong
+proposed scope — from *this* bug, or a different one not yet found — is legible at
+the one point a human reviews it before anything is deleted, rather than buried in a
+long flat list that invites skimming. This is deliberately redundant with the code
+fix above: the code fix prevents the known failure mode, the grouped message is a
+generic safety net for an unknown one.
+
+### Two more frontend/perf findings from the same testing session (2026-07-14)
+
+- **Chat-open latency:** `chat_view()` (`app.py`) called `gcal_service.refresh_upcoming_cache()`
+  unconditionally on every page load — a live network round trip to the Google
+  Calendar API (one call per connected calendar) with no throttling at all, measured
+  at ~1.4s, repeating on *every single click* into a chat even seconds apart. Fixed
+  with a `_CACHE_FRESH_SECONDS = 60` window in `gcal_service.py`: the refresh is a
+  no-op if the cache is under a minute old. Verified directly — first call 1.38s,
+  immediate second call 0.00s. A personal calendar doesn't change fast enough to
+  justify refetching on every click within the same minute.
+- **Bulk-delete confirm dialog — disabled, unresolved:** the `window.confirm()` dialog
+  added on top of the existing text-based delete confirmation (see above) was
+  followed by reports of `[object Object]` chat bubbles and repeated 500s
+  (`app.py`'s `chat_message()`: `content` arrived as a JSON object, not a string).
+  First hypothesis — the new `sendChatMessage()` function name colliding with the
+  browser's native `window.postMessage` — was fixed (renamed) but did **not** stop
+  the recurrence, so it was at most a contributing factor, not the root cause. The
+  confirmed reproduction showed 4 identical malformed POSTs firing automatically,
+  within the same second, immediately after a **brand-new** chat page load (so not
+  stale cached JS) — not tied to any visible user action. Root cause not found.
+  Mitigated two ways rather than left as an open crash: (1) the `window.confirm()`
+  call is commented out in `chat.html` — bulk deletes still work via the
+  already-solid typed-"confirm" flow, just without the extra native dialog; (2)
+  `chat_message()` now checks `isinstance(content, str)` and returns a clean 400 with
+  full request diagnostics logged (`DEBUG_BADBODY`: content value, headers, raw body)
+  instead of crashing with a 500, so *if* this recurs there's a real diagnostic trail
+  instead of another blind investigation. Not reproduced since these two changes.
 
 ---
 

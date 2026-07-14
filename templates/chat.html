@@ -280,14 +280,19 @@
     historyEl.scrollTop = historyEl.scrollHeight;
   }
 
-  async function sendMessage() {
-    const text = inputEl.value.trim();
-    if (!text) return;
-
-    inputEl.value = '';
-    autoResize();
-    sendBtn.disabled = true;
-
+  // Posts one message and renders the response. Factored out of sendMessage() so the
+  // bulk-delete confirm dialog below can re-invoke the exact same round trip for an
+  // auto-sent "confirm" as a typed message would go through — same request shape, same
+  // history persistence, same error handling.
+  // NOT named `postMessage` — a top-level `function postMessage(){}` in a plain
+  // <script> becomes `window.postMessage`, silently shadowing the browser's native
+  // cross-window messaging API. Hit this empirically: something else in the browser
+  // (OAuth popup, an extension) called the real window.postMessage(data, origin) for
+  // an unrelated purpose, which invoked this function instead with an arbitrary object
+  // as `text` — rendered as a "[object Object]" chat bubble, then a 500 from the
+  // server rejecting a non-string `content` field. Keep this name (or any name other
+  // than `postMessage`) if touching this function.
+  async function sendChatMessage(text) {
     // Remove the "new chat" placeholder if present
     const placeholder = historyEl.querySelector('.sys-msg');
     if (placeholder) placeholder.remove();
@@ -310,23 +315,54 @@
 
       if (!res.ok || !data || data.error) {
         appendMsg('assistant', 'Error: ' + (data?.error || `Server error (${res.status})`));
-      } else {
-        appendMsg('assistant', data.reply);
-        appendSources(data.sources);
-        // Update page title to reflect auto-title on first message
-        if (document.getElementById('chat-title').textContent === 'New Chat') {
-          const titleRes = await fetch(`/chat/${CHAT_ID}`);
-          // Can't easily extract the title from HTML; rely on server-set h1 on next load.
-          // Just trim the input as a local approximation.
-          const approx = text.slice(0, 60) + (text.length > 60 ? '...' : '');
-          document.getElementById('chat-title').textContent = approx;
-          document.title = approx;
-        }
+        return;
       }
+
+      appendMsg('assistant', data.reply);
+      appendSources(data.sources);
+      // Update page title to reflect auto-title on first message
+      if (document.getElementById('chat-title').textContent === 'New Chat') {
+        // Can't easily extract the title from HTML; rely on server-set h1 on next load.
+        // Just trim the input as a local approximation.
+        const approx = text.slice(0, 60) + (text.length > 60 ? '...' : '');
+        document.getElementById('chat-title').textContent = approx;
+        document.title = approx;
+      }
+
+      // A bulk delete (multiple tasks/projects/events at once) needs an explicit
+      // yes/no, not just another chat bubble the user could skim past or misread as
+      // already-done — surface it as a real confirm dialog rather than relying on the
+      // user noticing it and typing "confirm" themselves. Clicking OK re-sends
+      // "confirm" exactly the way a typed reply would. This dialog is a UX layer only,
+      // not the security boundary — the signed [ref: ...] marker that actually
+      // authorizes the delete lives solely in server-side chat history (see
+      // strip_pending_delete_marker in services/ai/service.py) and is never sent to
+      // the browser, so there's nothing here for a malicious page/extension to forge.
+      // window.confirm()-based auto-dialog temporarily disabled — under investigation
+      // for a reported page navigation/reload happening around this code path. The
+      // plain text confirmation ("reply confirm to proceed") from the chat bubble
+      // itself still works exactly as before; this only removes the extra native
+      // dialog layered on top. See DEBUG_BADBODY logging in app.py's chat_message().
+      // if (data.pending_delete) {
+      //   if (window.confirm(data.reply)) {
+      //     await sendChatMessage('confirm');
+      //   }
+      // }
     } catch (err) {
       thinking.remove();
       appendMsg('assistant', 'Network error: ' + err.message);
     }
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    inputEl.value = '';
+    autoResize();
+    sendBtn.disabled = true;
+
+    await sendChatMessage(text);
 
     sendBtn.disabled = false;
     inputEl.focus();

@@ -14,6 +14,15 @@ _REFRESH_URL = "https://oauth2.googleapis.com/token"
 # to pull Google Calendar itself — only this pre-fetched snapshot.
 _upcoming_cache = {"events": [], "fetched_at": None}
 
+# Below this age, refresh_upcoming_cache() is a no-op — every chat-view page load
+# calls it unconditionally (by design, so the AI's context is never more than one
+# navigation stale), but with no throttle at all this meant every single click into
+# a chat did a live, synchronous Google Calendar API round trip (one call per
+# connected calendar) before the page could render — measured at ~3s per chat open
+# even when the cache was seconds old. A single-user personal calendar does not
+# change fast enough to need a live refetch on every click within the same minute.
+_CACHE_FRESH_SECONDS = 60
+
 
 def _get_token(db):
     from datetime import datetime, timezone
@@ -97,8 +106,17 @@ def refresh_upcoming_cache(db, days_back=60, days_ahead=60):
     chat's passive context injection. Call this on any page load that could lead
     into a chat turn (chat view, calendar view) — never from inside the AI's
     tool-calling loop. Window spans well into the past too, since chat questions
-    often ask about recent past dates ("what happened on the 28th")."""
+    often ask about recent past dates ("what happened on the 28th").
+
+    No-ops if the cache was refreshed within _CACHE_FRESH_SECONDS — see that
+    constant's comment for why (this used to run, unthrottled, on every chat-view
+    page load)."""
     from datetime import datetime, timedelta, timezone
+
+    if _upcoming_cache["fetched_at"] is not None:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(_upcoming_cache["fetched_at"])).total_seconds()
+        if age < _CACHE_FRESH_SECONDS:
+            return
 
     if not is_connected(db):
         _upcoming_cache["events"] = []
