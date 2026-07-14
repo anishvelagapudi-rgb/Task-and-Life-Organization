@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -114,6 +116,11 @@ IMPORTANT RULES:
 - Never volunteer information, suggestions, or follow-up actions unless the user asks.
 - You ALWAYS have full access to the local calendar, and Google Calendar data is already injected into context when relevant. Never say you lack calendar access, cannot access the calendar (local or Google), or need permission. If a user asks about their calendar, use the UPCOMING EVENTS block already in context, or call list_events for local events beyond that window — do not refuse.
 - You ALWAYS have every one of the user's tasks (every status — inbox, active, done, blocked, archived) already injected into context as a CURRENT TASKS block. There is no separate tool for listing tasks — when asked to list, show, count, or summarize tasks, answer directly from that block. Never say you're unable to list tasks, lack access to them, or ask what to name a task when the user is asking to see existing tasks rather than create one.
+- Never create a task, project, event, or note as a substitute for answering a listing/query request you're unsure how to fulfill. If you don't have a tool for what's being asked, say so plainly instead of taking an unrelated action.
+
+BULK OR AMBIGUOUS TASK REFERENCES ("all tasks", "all inbox tasks", "these three", "the ones I completed today"):
+- You already have every task's id, title, and status in the CURRENT TASKS block. Never ask the user to supply task IDs — resolve which tasks are meant yourself from that block.
+- For any bulk action (updating or deleting more than one task), just call the tool once per matching task — do not ask the user for confirmation yourself and do not hold back the calls. A system-level safeguard automatically intercepts any request that would delete more than one task and asks the user to confirm before anything is actually removed, so you don't need to do this yourself — attempting the delete_task calls normally is the correct behavior even for "delete all tasks".
 """
 
 TOOLS = [
@@ -464,6 +471,89 @@ def _is_pure_task_listing(message: str) -> bool:
     return bool(_TASK_LISTING_RE.search(message))
 
 
+_AFFIRM_PHRASES = {
+    "y", "yes", "yep", "yeah", "yup", "sure", "ok", "okay", "confirm", "confirmed",
+    "do it", "go ahead", "proceed", "sounds good", "yes please", "yes, please",
+}
+_AFFIRM_DELETE_RE = re.compile(r"^delete (them|it|those|all)$", re.IGNORECASE)
+
+
+def _is_affirmative(text: str) -> bool:
+    normalized = (text or "").strip().rstrip(".!,").strip().lower()
+    return normalized in _AFFIRM_PHRASES or bool(_AFFIRM_DELETE_RE.match(normalized))
+
+
+# [ref: id,id,...|hmac] — the hmac binds the id list to this server process (keyed off
+# FLASK_SECRET_KEY) so the marker can't be forged by untrusted text the model might
+# reproduce verbatim from an indirect prompt-injection source (e.g. a malicious vault
+# note pulled in via passive RAG/search_vault/read_document). Without this, any
+# assistant-role text ending in a bracket pattern that merely *looks* like a pending
+# delete, followed by an unrelated affirmative user reply, could otherwise be read as
+# genuine confirmation and delete real tasks with no tool-calling round at all.
+_PENDING_DELETE_REF_RE = re.compile(
+    r"\[ref:\s*([0-9a-fA-F-]+(?:,[0-9a-fA-F-]+)*)\|([0-9a-f]+)\]\s*$"
+)
+
+
+def _sign_delete_ids(ids: list[str]) -> str:
+    key = os.environ.get("FLASK_SECRET_KEY", "").encode()
+    return hmac.new(key, ",".join(ids).encode(), hashlib.sha256).hexdigest()[:24]
+
+
+def strip_pending_delete_marker(text: str) -> str:
+    """Public helper for callers (app.py's browser chat route) that persist/display AI
+    replies — strips the internal [ref: ...] marker from what's shown to the user while
+    leaving the raw text (marker included) as what's actually stored/round-tripped, since
+    _pending_bulk_delete_ids needs the marker to survive in conversation history for the
+    confirmation flow to work."""
+    return _PENDING_DELETE_REF_RE.sub("", text or "").rstrip()
+
+
+def _pending_bulk_delete_ids(messages: list[dict]) -> list[str] | None:
+    """Detects the second half of a bulk-delete confirmation round trip. Deliberately
+    stateless (mirrors the rest of this module/ai_routes.py's stateless design) — the
+    "pending" state lives entirely in the signed [ref: id,id,...|hmac] marker this
+    module itself appended to its own prior confirmation reply, which the client resends
+    verbatim as part of `messages`. Only fires on an exact affirmative reply immediately
+    following a marker with a valid signature — see _confirm_bulk_delete_reply for where
+    the marker is produced, and the multi-delete_task interception in chat() below for
+    why this exists: the model cannot be trusted to reliably hold off on calling
+    delete_task itself for a bulk request (verified empirically — Gemini 2.5 Flash Lite
+    executed a 2-task delete immediately despite explicit prompt instructions to ask
+    first)."""
+    if len(messages) < 2:
+        return None
+    last, prev = messages[-1], messages[-2]
+    if last.get("role") != "user" or prev.get("role") != "assistant":
+        return None
+    if not _is_affirmative(last.get("content") or ""):
+        return None
+    m = _PENDING_DELETE_REF_RE.search(prev.get("content") or "")
+    if not m:
+        return None
+    ids, sig = m.group(1).split(","), m.group(2)
+    if not hmac.compare_digest(_sign_delete_ids(ids), sig):
+        return None
+    return ids
+
+
+def _confirm_bulk_delete_reply(tasks_by_id: dict, ids: list[str]) -> str:
+    """Builds the confirmation prompt for a would-be multi-task delete, ending in a
+    signed [ref: ...] marker that _pending_bulk_delete_ids parses back out and verifies
+    on the user's next turn. Only ids that actually resolve to a real, currently-existing
+    task are included — both in the displayed title list and in what gets signed/deleted
+    on confirm — so the displayed count and titles always match exactly what confirming
+    would do, and a stale/bogus id can't sneak into the marker."""
+    resolved = [i for i in ids if i in tasks_by_id]
+    titles = [f'"{tasks_by_id[i]["title"]}"' for i in resolved]
+    sig = _sign_delete_ids(resolved)
+    return (
+        f"This will permanently delete {len(resolved)} tasks: {', '.join(titles)}. "
+        f'Reply "confirm" to proceed, or say anything else to cancel.\n\n'
+        f"[ref: {','.join(resolved)}|{sig}]"
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -523,14 +613,14 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         return {"success": True, "id": fields["id"], "title": args["title"]}
 
     if name == "delete_project":
-        db.execute("DELETE FROM projects WHERE id = ?", (args["id"],))
+        cur = db.execute("DELETE FROM projects WHERE id = ?", (args["id"],))
         db.commit()
-        return {"success": True, "id": args["id"]}
+        return {"success": cur.rowcount > 0, "id": args["id"]}
 
     if name == "delete_task":
-        db.execute("DELETE FROM tasks WHERE id = ?", (args["id"],))
+        cur = db.execute("DELETE FROM tasks WHERE id = ?", (args["id"],))
         db.commit()
-        return {"success": True, "id": args["id"]}
+        return {"success": cur.rowcount > 0, "id": args["id"]}
 
     if name == "update_task":
         task_id = args["id"]
@@ -1042,8 +1132,25 @@ CURRENT PROJECTS:
             ORDER BY (status = 'done'), (status = 'archived'), priority DESC, due_date ASC
         """).fetchall()
         tasks = [dict(r) for r in rows]
+        tasks_by_id = {t["id"]: t for t in tasks}
+
+        # Second half of the bulk-delete confirmation round trip (see
+        # _pending_bulk_delete_ids) — resolved entirely deterministically, no model
+        # call needed, before any of the normal chat machinery below runs.
+        pending_ids = _pending_bulk_delete_ids(messages)
+        if pending_ids is not None:
+            deleted_titles = []
+            for tid in pending_ids:
+                title = tasks_by_id.get(tid, {}).get("title", tid)
+                result = _execute_tool(db, "delete_task", {"id": tid})
+                if result.get("success"):
+                    deleted_titles.append(title)
+            if deleted_titles:
+                return f"Deleted {len(deleted_titles)} tasks: {', '.join(deleted_titles)}.", []
+            return "Nothing was deleted — those tasks may already be gone.", []
 
         projects = db.execute("SELECT id, title, status FROM projects ORDER BY title").fetchall()
+        projects_by_id = {p["id"]: dict(p) for p in projects}
         project_lines = "\n".join(f"  [{p['id']}] {p['title']} ({p['status']})" for p in projects) or "  None"
 
         calendars = db.execute("SELECT id, name FROM calendars ORDER BY name").fetchall()
@@ -1192,8 +1299,40 @@ remove one.]"""
         # was actually grounded in.
         used_sources: list[dict] = []
         tool_round_happened = False
+        # Tracks task ids actually deleted so far across ALL rounds of this single
+        # chat() call — the gate below is cumulative, not per-round, specifically so a
+        # model can't bypass confirmation by spreading a bulk delete across multiple
+        # single-item rounds (each individually under the per-round threshold).
+        executed_delete_ids: list[str] = []
         for _ in range(5):
             reply_text, tool_calls = self.provider.chat_with_tools(system, internal, TOOLS)
+
+            # Intercept a delete_task set before executing anything if it would push
+            # this turn's total deletions past 1, regardless of what the model's own
+            # reply_text says it's going to do — do not trust the model to hold off on
+            # the delete_task calls itself (see _pending_bulk_delete_ids docstring for
+            # why this is enforced in code rather than by prompt alone). Any non-delete
+            # calls in the same round still execute normally so a compound request
+            # ("delete A and B, and add C") doesn't silently drop the C part.
+            delete_calls = [tc for tc in tool_calls if tc["name"] == "delete_task"]
+            other_calls = [tc for tc in tool_calls if tc["name"] != "delete_task"]
+            pending_ids = [tc["arguments"]["id"] for tc in delete_calls]
+            if pending_ids and len(executed_delete_ids) + len(pending_ids) > 1:
+                side_replies = []
+                for tc in other_calls:
+                    result = _execute_tool(db, tc["name"], tc["arguments"])
+                    if tc["name"] == "search_vault" and result.get("found"):
+                        for c in result["chunks"]:
+                            used_sources.append({"source": _mask_chat_source(c["source"]), "heading": c["heading"]})
+                    if tc["name"] == "read_document" and result.get("found"):
+                        used_sources.append({"source": tc["arguments"]["path"], "heading": ""})
+                    if tc["name"] == "find_connections" and result.get("found"):
+                        for c in result["connections"]:
+                            used_sources.append({"source": c["target"], "heading": ""})
+                    side_replies.append(_synthesize_tool_confirmation(tc["name"], tc["arguments"], result))
+                confirm_reply = _confirm_bulk_delete_reply(tasks_by_id, pending_ids)
+                reply = "\n".join(side_replies + [confirm_reply]) if side_replies else confirm_reply
+                return reply, _dedupe_sources(used_sources)
 
             if not tool_calls:
                 if reply_text:
@@ -1337,6 +1476,16 @@ remove one.]"""
             last_tool_results = []
             for tc in tool_calls:
                 result = _execute_tool(db, tc["name"], tc["arguments"])
+                # delete_task/delete_project results only ever carry an id, never a
+                # title — _synthesize_tool_confirmation would otherwise show the raw
+                # UUID to the user. Backfill from the pre-deletion lookups above.
+                if result.get("success") and "title" not in result:
+                    if tc["name"] == "delete_task":
+                        result["title"] = tasks_by_id.get(tc["arguments"].get("id"), {}).get("title")
+                    elif tc["name"] == "delete_project":
+                        result["title"] = projects_by_id.get(tc["arguments"].get("id"), {}).get("title")
+                if tc["name"] == "delete_task" and result.get("success"):
+                    executed_delete_ids.append(tc["arguments"]["id"])
                 last_tool_results.append((tc["name"], tc["arguments"], result))
                 if tc["name"] == "search_vault" and result.get("found"):
                     for c in result["chunks"]:

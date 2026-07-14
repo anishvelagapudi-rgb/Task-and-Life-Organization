@@ -15,7 +15,7 @@ from classes.Project import Project
 from api import api_bp
 from ai_routes import ai_bp
 from services.ai.gemini_provider import GeminiProvider
-from services.ai.service import AIService
+from services.ai.service import AIService, strip_pending_delete_marker
 from services.ai.budget import BudgetExceededError
 from authlib.integrations.flask_client import OAuth
 import uuid
@@ -645,6 +645,8 @@ def chat_view(chat_id):
     ).fetchall()]
     for m in messages:
         m["sources"] = json.loads(m["sources"]) if m.get("sources") else []
+        if m["role"] == "assistant":
+            m["content"] = strip_pending_delete_marker(m["content"])
     return render_template("chat.html", chat=dict(row), messages=messages)
 
 
@@ -703,13 +705,16 @@ def chat_message(chat_id):
             title_row = db.execute("SELECT title FROM chats WHERE id = ?", (chat_id,)).fetchone()
             all_msgs = history + [
                 {"role": "user", "content": content},
-                {"role": "assistant", "content": reply},
+                {"role": "assistant", "content": strip_pending_delete_marker(reply)},
             ]
             index_chat(chat_id, title_row["title"], all_msgs)
         except Exception:
             logger.exception("Failed to re-index chat %s", chat_id)
 
-    return json.dumps({"reply": reply, "sources": sources}), 200, {"Content-Type": "application/json"}
+    # `reply` (stored above, raw) intentionally keeps any [ref: ...] marker so the
+    # confirmation round trip survives in chat_messages/history — only what's actually
+    # shown to the user here gets it stripped.
+    return json.dumps({"reply": strip_pending_delete_marker(reply), "sources": sources}), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/chat/<chat_id>/save", methods=["POST"])
