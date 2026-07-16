@@ -114,6 +114,35 @@ def enforce_no_self_parent(fields: dict, task_id: str) -> None:
         fields["parent_task_id"] = None
 
 
+def enforce_parent_exists(fields: dict, db) -> None:
+    """parent_task_id must reference a real, currently-existing task row — silently
+    dropped (same lenient pattern as enforce_no_self_parent/enforce_recurring_invariant
+    above) if it doesn't, rather than left as a dangling reference.
+
+    Surfaced by testing an alternate AI provider (NVIDIA-hosted Gemma-4-31B-IT) against
+    the exact "1 parent + N subtasks" bulk-create shape that originally exposed the
+    round-cap truncation bug (see README) — this provider batched the parent's
+    create_task plus 50 subtask create_task calls into a single tool-calling round,
+    so none of the subtask calls could know the parent's real server-generated UUID
+    yet (it isn't returned until that round's tool results come back on the next
+    turn). Rather than omit parent_task_id, the model filled it with the parent's
+    title string. Nothing previously validated the value at all, so every subtask
+    silently stored a parent_task_id matching no real row: app.py's parent-chain walk
+    (`task_map.get(cur['parent_task_id'])`) treats an unresolvable id exactly like "no
+    parent" and gives up, so the subtasks would have rendered as orphaned root-level
+    tasks with zero visible link to their intended parent — while looking, by count
+    and title alone, like a fully successful bulk create. This is a general schema
+    gap, not specific to that provider or to the AI tool-calling path — api.py's own
+    external REST create/update endpoints accept parent_task_id from any caller with
+    the same lack of validation, so both call this, same as the other invariants here.
+    Mutates `fields` in place."""
+    pid = fields.get("parent_task_id")
+    if not pid:
+        return
+    if not db.execute("SELECT 1 FROM tasks WHERE id = ?", (pid,)).fetchone():
+        fields["parent_task_id"] = None
+
+
 def init_db(app):
     """Schema is created once via supabase_setup.sql run directly against the
     Supabase project (see README) — Postgres isn't a per-boot local file, so there's

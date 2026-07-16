@@ -601,6 +601,224 @@ generic safety net for an unknown one.
   instead of crashing with a 500, so *if* this recurs there's a real diagnostic trail
   instead of another blind investigation. Not reproduced since these two changes.
 
+### Silent truncation on large bulk creates (2026-07-14)
+
+**Incident:** asked to create one task with 19 subtasks (one per name in a list),
+the model created the parent plus only 4 subtasks, then returned a clean-sounding
+confirmation as if the request were fully done. Nothing errored; the user only
+noticed because they counted the result.
+
+**Root cause:** `chat()`'s agentic loop (`for _ in range(5)`) caps tool-calling at 5
+rounds per message. Subtasks need the parent's server-generated UUID
+(`create_task` assigns `id = str(uuid.uuid4())` and takes whatever
+`parent_task_id` it's given with no existence check), so the parent must be
+created and its id read back from the tool result before any subtask calls can
+reference it — ruling out doing parent + 19 subtasks in one round. Gemini then
+paced itself at a handful of `create_task` calls per round rather than batching
+the rest, so all 5 rounds were consumed without finishing. When every round
+returns at least one tool call, the loop never hits its only early-return branch
+(`if not tool_calls:`) and instead falls out of the `for` loop to a final,
+tool-less `chat()` call that summarizes whatever fit in those 5 rounds — with no
+signal that the original request was cut short, and no reason for the model to
+volunteer that on its own.
+
+**Fix:** same "verify against what actually happened, don't trust the model's own
+phrasing" principle as the failures/`fail_note` check earlier in `chat()`.
+Falling out of the loop (as opposed to returning early from inside it) is itself
+a deterministic signal that every round was still doing tool work when the
+budget ran out, regardless of what the final summary text says — so a fixed
+notice ("reached the assistant's per-message tool-call limit before finishing
+... send another message to have it continue") is now appended to whatever reply
+comes back on that path. This doesn't make one message create all 19 subtasks
+in one shot (no change to the round cap or to Gemini's per-round pacing) — it
+just stops the assistant from silently implying a partial bulk operation was
+complete. Resuming a truncated bulk create still requires the user to notice
+and send a follow-up message asking it to continue.
+
+### NVIDIA/Gemma-4-31B-IT as an alternate provider — a worse-shaped bug than the one above (2026-07-14)
+
+**Context:** added `services/ai/nvidia_provider.py` (`NvidiaProvider`), a second
+`AIProvider` implementation hitting NVIDIA's free developer-tier NIM catalog
+(`google/gemma-4-31b-it` by default) over its OpenAI-compatible endpoint, as an
+alternative to `gemini_provider.py`. Not wired in as the default — `app.py`/
+`ai_routes.py` still construct `GeminiProvider()`; this exists to be swapped in
+and A/B tested. `chat_template_kwargs: {"enable_thinking": True}` is sent via
+`extra_body` on every call (a NIM/vLLM-specific field the `openai` SDK doesn't
+expose directly) — NVIDIA's own docs say tool calling on this model family works
+best in thinking mode. Not hooked into `budget.py`: that module's per-token rates
+are Gemini-specific pricing, not a lookup table, and this tier is free — same
+reasoning `groq_provider.py` already skips it for.
+
+**First test, 1 parent + 19 subtasks (the exact shape that exposed the round-cap
+bug above):** clean. 3 of 5 rounds used — round 1 created the parent, round 2
+batched *all 19* subtask `create_task` calls into one round (unlike Gemini's
+pacing), round 3 confirmed. 20/20 tasks, 19/19 names, zero duplicates.
+
+**Pushed to 50 subtasks — found a worse bug.** This time the model batched the
+parent's `create_task` *and* all 50 subtask `create_task` calls into a single
+round. Since every call in that round is emitted before any tool result comes
+back, none of the subtask calls could know the parent's real server-generated
+UUID (`create_task` assigns `id = str(uuid.uuid4())`; nothing is returned until
+the round's results round-trip on the next turn). Rather than omit
+`parent_task_id`, the model filled it with the parent's **title string**. Nothing
+validated the value at all, so all 50 subtasks silently stored a
+`parent_task_id` matching no real row. Checked the blast radius directly in
+`app.py`: no crash — the parent-chain walk (`task_map.get(cur['parent_task_id'])`)
+just treats an unresolvable id exactly like "no parent" and gives up — but the
+50 subtasks would have rendered as orphaned root-level tasks with zero visible
+link to the parent, while every count/name check said "50/50, all correct."
+Strictly worse than the round-cap truncation above: that one was honestly
+incomplete; this one looked fully successful while being structurally broken.
+
+**Fix, general schema invariant, not provider-specific:** `enforce_parent_exists()`
+in `db.py` — same lenient silent-drop pattern as `enforce_no_self_parent`/
+`enforce_recurring_invariant` already there. If `parent_task_id` is set but
+doesn't match a real row, it's dropped (task becomes visibly root-level) rather
+than stored as a dangling reference. Wired into both `services/ai/service.py`'s
+`create_task`/`update_task` *and* `api.py`'s REST create/update — the REST path
+accepts `parent_task_id` from any external caller with the exact same lack of
+validation, so this was never actually an AI-only exposure, just one the AI's
+batching behavior happened to trigger first. Verified three ways: (1) a live
+retest of the identical 50-subtask batch — 50/50 correctly parented to the real
+UUID; (2) a direct unit check that the exact bogus value from the incident
+(the parent's title string) gets dropped to `None`; (3) a real, valid
+`parent_task_id` and an absent one both pass through untouched.
+
+**Separate, still-open finding: NVIDIA's gateway timed out outright on the first
+50-subtask attempt** (`openai.InternalServerError: Error code: 504`) generating
+that many tool calls in one round — surviving the `openai` SDK's own built-in
+retry (2 attempts on 5xx/429) before raising, meaning more client-side retries
+alone won't reliably fix it. A second attempt succeeded. Caught in `app.py`'s
+browser chat route already (broad `except Exception` → `explain_error()`, no
+corruption — just an honest incomplete parent). **Was not** caught in
+`ai_routes.py`'s REST `/api/ai/chat`/`/api/ai/recommendations` — that blueprint
+only caught `httpx.NetworkError`, a `google-genai`-specific exception type; an
+`openai.InternalServerError` fell straight through to Flask's bare default 500
+with no JSON body, breaking the API contract every other response there honors.
+Fixed: both routes now catch `BudgetExceededError` distinctly (429) and any
+other exception broadly (503 with a logged traceback), provider-agnostic rather
+than narrowed to Gemini's own exception types. The underlying gateway-timeout
+risk on very large single-round batches is not "fixed" by this — just no longer
+silently ugly when it happens. Single-round batches up to 19 items tested clean
+twice; 50 is where it started to strain.
+
+### Broader NVIDIA/Gemma-4-31B-IT evaluation — tool-call reliability gap, a hybrid split, and an unrelated Gemini bug it surfaced (2026-07-14)
+
+**Round 2 of testing** (RAG/vault Q&A, `read_document`, `find_connections`, multi-event
+create, both calendar date-resolution paths including the AI-only elliptical
+fallback, `get_recommendations`, psych-field inference on `create_task`) all came
+back clean — as good as or better than Gemini, notably including the exact class
+of date-arithmetic bug ("day after tomorrow") this file documents Gemini having
+had.
+
+**But `update_event`/`delete_event` (name → resolved-id operations) broke:**
+instead of populating the real `tool_calls` field, the model sometimes wrote what
+looked like a tool call as plain text in `content` — at least five distinct
+malformed shapes across two short test runs (parens-call style, dict-literal
+style, JSON-object-in-parens with quoted keys, all inconsistent with each other),
+and using **hallucinated field names that don't match the real tool schema**
+(`event_id`/`start_time`/`end_time` instead of `id`/`start_datetime`/
+`end_datetime`) — a schema miss, not just a formatting miss. Confirmed this is
+not a thinking-mode artifact: disabling `enable_thinking` did not improve the
+failure rate (0/6 across a dedicated 3-trial-each retest, same as `enable_thinking`
+on) and made responses noticeably slower. Confirmed it isn't even confined to
+tool-calling requests: the same malformed text showed up once in a **plain,
+tools-free `chat()` call** too (the `list_events` single-tool-call shortcut's
+answer-synthesis step), meaning the quirk can leak from thinking-mode habit even
+when there's no tool schema in the request to be attempting to satisfy.
+
+**Mitigated in `nvidia_provider.py`, not "fixed":** a deterministic (no extra
+model call) regex-based recovery layer. `chat_with_tools()` tries to parse the
+malformed text back into a real tool call — extracting the function name and
+args, aliasing the known hallucinated field names, and a generic `*_id → id`
+rule (every write/delete tool's real schema names its target-row parameter
+literally `id`) — and falls back to an honest "something went wrong" message if
+it can't, never letting the raw `<|tool_call>...` text reach the user either way.
+`chat()` gets the same never-show-raw-garbage treatment minus the recovery step
+(there's no tool schema to recover into for a plain prose call): the matched
+block is stripped, and if nothing legible remains, the same honest fallback is
+returned. Verified against all six real malformed samples collected across both
+test rounds. This is explicitly a safety net for a known quirk, not a solved
+reliability problem — new malformed shapes could still appear uncaught.
+
+**Given all this, added a hybrid mode rather than switching the default outright:**
+`AIService.__init__` now takes an optional `reasoning_provider` (defaults to the
+same provider passed as `provider`, so existing single-provider callers are
+unaffected). `provider` remains the sole tool-decider — the whole `chat_with_tools`
+loop and its inline no-tool-call replies always run on it. `reasoning_provider`
+only gets the handful of already-separate, tools-free plain `chat()` calls:
+`get_recommendations`, `explain_error`, the pure-task-listing bypass,
+`_resolve_calendar_range`'s AI fallback, and the four single-tool-call
+answer-synthesis calls (`search_vault`/`list_events`/`read_document`/
+`find_connections`) — exactly the set that tested clean above. The round-cap-
+exhaustion fallback (built from a conversation history containing real
+`tool_calls`/`tool`-role messages) deliberately was **not** switched — untested
+territory to hand a foreign tool-call history to a provider that never produced
+it. Verified end-to-end with `AIService(GeminiProvider(), reasoning_provider=NvidiaProvider())`.
+
+**That hybrid-config test surfaced a real, pre-existing, Gemini-specific bug —
+unrelated to any of the above.** Asked to move an event by name ("Move X to 10am
+instead"), Gemini called `update_event` with a **fabricated id matching no real
+row** — no prior `list_events` call, no calendar context injected (the message
+didn't contain any word `_CALENDAR_WORDS` matches, so the deterministic
+events-in-system-prompt injection never fired), so it had no real data to resolve
+the name from and invented a plausible-looking id anyway. `update_event`'s
+`_execute_tool` handler always returned `{"success": True}` regardless of whether
+the `UPDATE` actually matched a row (unlike `update_project`, which already
+checked `cur.rowcount > 0`) — so the silent no-op got reported as success, and
+the model confidently told the user it moved an event that was never touched.
+Exactly the "silently hallucinated confirmations" failure class this file already
+documents fighting for calendar chat, in a gap that fix didn't cover. Fixed the
+mechanical half: `update_task`/`update_event` now check `cur.rowcount > 0` the
+same way `update_project` does, so a fabricated/stale id now honestly reports
+failure (surfaced to the user via the existing `_synthesize_tool_confirmation`/
+fail-note machinery, unchanged) instead of a false success. The root cause — why
+Gemini fabricated an id instead of calling `list_events` — is not fixed, only
+made loud instead of silent when it happens.
+
+**Dug into the root cause directly.** Reproduced with a 3-trial repro (same
+"move X to 10am instead" phrasing, fresh real event each time, spying on every
+`_execute_tool` call): **2 of 3 fabricated an id** (one trial asked the user for
+the ID outright instead — itself a violation of a separate explicit system-prompt
+rule never to do that), despite the system prompt already stating, verbatim,
+"events are one `list_events` call away — resolve which item(s) a name refers to
+yourself" and "Only claim an action was taken after a tool call confirms it
+succeeded." One fabricated id was literally the event's own **title string**
+reused as the id — the same title-as-id confusion pattern found independently in
+NVIDIA/Gemma's `parent_task_id` corruption bug above, suggesting this specific
+confusion is a cross-model tendency, not something particular to either provider.
+With the rowcount fix in place, all fabricated-id attempts now fail honestly
+(no false confirmations) — confirming that fix closes the dangerous half
+regardless of root cause.
+
+Tried a fix, and it made things worse — worth recording so it isn't retried.
+Added clock-time patterns (`10am`, `3:30pm`, `noon`) to `_CALENDAR_WORDS` so a
+bare time-of-day phrase would trigger the same deterministic EVENTS-block
+injection weekday/date words already get. Re-ran the identical repro: **3 of 3
+fabricated afterward — worse, not better.** Cause: `_CALENDAR_WORDS` matching
+doesn't just add default event context, it routes the message through
+`_resolve_calendar_range`, which tries its deterministic date-extraction layers
+first and, finding nothing (a bare time has no actual *date* for those to grab),
+falls through to its AI-guessing JSON fallback. With nothing date-like in the
+message to ground it, the model hallucinated date ranges months away (October
+2026, January 2027) with no basis at all, so the resulting EVENTS-block query
+covered the wrong window and still contained no real data for the event being
+referenced — new failure stacked on the old one instead of fixing it. Reverted
+the regex change; `_resolve_calendar_range`'s AI fallback has no sanity check
+against a message with zero date content producing a wildly-off answer, and
+fixing *that* is a separate, deeper piece of work than this gap warranted doing
+un-planned. The rowcount fix is what's actually load-bearing here.
+
+**Net result: wired in.** `app.py`'s `_ai_service` and `ai_routes.py`'s
+`_get_service()` both now construct `AIService(GeminiProvider(),
+reasoning_provider=NvidiaProvider())` — Gemini remains the sole tool-decider
+(unaffected by any of NVIDIA's tool-calling issues above, by construction),
+NvidiaProvider only ever gets the tools-free reasoning/synthesis calls it tested
+clean on. `NVIDIA_API_KEY` is consequently now a required `.env` value, not an
+optional one — both providers are constructed eagerly at import time in `app.py`,
+same as every other required secret in this codebase (no fallback if it's
+missing, matching how `GEMINI_API_KEY`/`FLASK_SECRET_KEY`/etc. already behave).
+
 ---
 
 ## RAG Pipeline (`services/rag/`) — How It Works and Why

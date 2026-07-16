@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from db import get_db, enforce_recurring_invariant, enforce_no_self_parent
+from db import get_db, enforce_recurring_invariant, enforce_no_self_parent, enforce_parent_exists
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -116,6 +116,7 @@ def upsert_task():
 
         enforce_recurring_invariant(updates, existing_row["recurring"])
         enforce_no_self_parent(updates, task_id)
+        enforce_parent_exists(updates, db)
         updates["updated_at"] = ts
 
         # Build "col1 = ?, col2 = ?" dynamically from whatever fields were sent.
@@ -139,6 +140,7 @@ def upsert_task():
         if "ai_generated" in fields:
             fields["ai_generated"] = int(bool(fields["ai_generated"]))
         enforce_recurring_invariant(fields)
+        enforce_parent_exists(fields, db)
         new_id = str(uuid.uuid4())
         fields["id"] = new_id
         fields["created_at"] = ts

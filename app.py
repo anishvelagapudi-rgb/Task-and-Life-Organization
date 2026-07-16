@@ -15,6 +15,7 @@ from classes.Project import Project
 from api import api_bp
 from ai_routes import ai_bp
 from services.ai.gemini_provider import GeminiProvider
+from services.ai.nvidia_provider import NvidiaProvider
 from services.ai.service import AIService, strip_pending_delete_marker, has_pending_delete_marker
 from services.ai.budget import BudgetExceededError
 from authlib.integrations.flask_client import OAuth
@@ -66,8 +67,12 @@ google = oauth.register(
 VALID_SESSIONS = {}
 OWNER_EMAIL = os.environ['OWNER_EMAIL']
 
-# Shared AI service instance — initialized once after .env is loaded.
-_ai_service = AIService(GeminiProvider())
+# Shared AI service instance — initialized once after .env is loaded. Gemini
+# remains the sole tool-decider; NvidiaProvider only ever gets the tools-free
+# reasoning/synthesis calls (see AIService.__init__'s docstring and README's
+# "NVIDIA/Gemma-4-31B-IT as an alternate provider" section for why this split,
+# not a straight swap, and what was tested before wiring it in here).
+_ai_service = AIService(GeminiProvider(), reasoning_provider=NvidiaProvider())
 
 
 def get_current_user():

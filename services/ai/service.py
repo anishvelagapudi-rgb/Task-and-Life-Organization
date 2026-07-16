@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import dateparser
 from dateparser.search import search_dates
 
-from db import enforce_recurring_invariant, enforce_no_self_parent
+from db import enforce_recurring_invariant, enforce_no_self_parent, enforce_parent_exists
 from .provider import AIProvider
 
 logger = logging.getLogger(__name__)
@@ -508,6 +508,16 @@ _CALENDAR_WORDS = re.compile(
     r"\d{1,2}(st|nd|rd|th)|\d{1,2}/\d{1,2}|\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE,
 )
+# Tried adding a bare clock-time pattern here ("10am", "3:30pm", "noon") to close the
+# gap where "move X to 10am instead" injects no event context at all (see the
+# id-fabrication incident in README's NVIDIA section) -- reverted. A time alone has
+# no date for _resolve_calendar_range's deterministic layers to extract, so it fell
+# through to that function's AI-guessing fallback, which isn't reliable when there's
+# nothing date-like in the message to ground it: verified live, it hallucinated dates
+# months away (Oct 2026, Jan 2027) with zero basis, making event-lookup worse, not
+# better (3/3 fabricated afterward vs. 2/3 before). Left alone; the rowcount fix
+# below is what actually closes the dangerous half of this (a false confirmation),
+# and does so regardless of whether _CALENDAR_WORDS matches at all.
 
 _MUTATION_START = re.compile(
     r"^\s*(mark|complete|delete|remove|update|set|change|rename|archive|"
@@ -775,6 +785,7 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         fields.setdefault("status", "inbox")
         fields.setdefault("priority", "medium")
         enforce_recurring_invariant(fields)
+        enforce_parent_exists(fields, db)
         if fields["status"] == "done":
             fields["completed_at"] = _now()
         fields["id"] = str(uuid.uuid4())
@@ -819,6 +830,7 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         existing_row = db.execute("SELECT recurring, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         enforce_recurring_invariant(updates, existing_row["recurring"] if existing_row else None)
         enforce_no_self_parent(updates, task_id)
+        enforce_parent_exists(updates, db)
         # completed_at isn't a model-writable field (see _TASK_WRITE_FIELDS) — derive it
         # from the status transition instead, mirroring app.py's update_task route. Without
         # this, the AI could mark a task 'done' with no completed_at ever set, which
@@ -832,9 +844,17 @@ def _execute_tool(db, name: str, args: dict) -> dict:
                 updates["completed_at"] = None
         updates["updated_at"] = _now()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", [*updates.values(), task_id])
+        # rowcount, not a bare True -- unlike update_project (which already checked
+        # this), a task_id the model invented rather than resolved via a real lookup
+        # would otherwise UPDATE zero rows and still get reported back as success,
+        # letting the model confidently confirm a change that never happened. Caught
+        # live: asked to move an event by name with no prior list_events call and no
+        # calendar context injected (the message didn't trigger _CALENDAR_WORDS), the
+        # model fabricated a plausible-looking id and update_event's identical old
+        # always-True pattern let it report "moved to 10am" with zero rows touched.
+        cur = db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", [*updates.values(), task_id])
         db.commit()
-        return {"success": True, "id": task_id}
+        return {"success": cur.rowcount > 0, "id": task_id}
 
     if name == "list_events":
         start_date = args.get("start_date", "")
@@ -889,9 +909,11 @@ def _execute_tool(db, name: str, args: dict) -> dict:
             return {"success": False, "error": "No valid fields to update"}
         updates["updated_at"] = _now()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        db.execute(f"UPDATE events SET {set_clause} WHERE id = ?", [*updates.values(), event_id])
+        # See the matching comment on update_task above -- same rowcount fix, same
+        # incident (this is the exact call that silently no-op'd there).
+        cur = db.execute(f"UPDATE events SET {set_clause} WHERE id = ?", [*updates.values(), event_id])
         db.commit()
-        return {"success": True, "id": event_id}
+        return {"success": cur.rowcount > 0, "id": event_id}
 
     if name == "delete_event":
         cur = db.execute("DELETE FROM events WHERE id = ?", (args["id"],))
@@ -1247,8 +1269,26 @@ def _dedupe_sources(sources: list[dict]) -> list[dict]:
 
 
 class AIService:
-    def __init__(self, provider: AIProvider):
+    def __init__(self, provider: AIProvider, reasoning_provider: AIProvider | None = None):
+        # `provider` is the sole tool-decider: the whole chat_with_tools loop in
+        # chat() below, and its inline no-tool-call replies, always run on this one.
+        # `reasoning_provider` (defaults to `provider` itself, preserving old
+        # single-provider behavior when omitted) only ever gets the handful of
+        # already-separate, tools-free plain chat() calls -- get_recommendations,
+        # explain_error, the pure-task-listing bypass, _resolve_calendar_range's
+        # AI fallback, and the search_vault/list_events/read_document/
+        # find_connections single-tool-call answer-synthesis calls. Those are
+        # exactly the calls tested clean against NVIDIA/Gemma-4-31B-IT (README:
+        # "NVIDIA/Gemma-4-31B-IT as an alternate provider" section) while every
+        # failure found there was specifically in tool-*deciding*, never in these
+        # synthesis-only calls -- so this split gets whatever prose/reasoning
+        # upside a second model offers without ever asking it to call a tool.
+        # The round-cap-exhaustion fallback (chat()'s final_reply, built from a
+        # conversation history containing real tool_calls/tool-role messages) is
+        # deliberately NOT switched -- untested territory to hand a foreign
+        # tool-call history to a provider that never produced it.
         self.provider = provider
+        self.reasoning_provider = reasoning_provider or provider
 
     def get_recommendations(self, db) -> dict:
         rows = db.execute("""
@@ -1280,7 +1320,7 @@ Return a JSON object with this exact shape:
 Pick the top 3 tasks to work on right now. Only include tasks from the list above.
 Respond with raw JSON only — no markdown, no extra text."""
 
-        raw = self.provider.chat(_SYSTEM_PROMPT, [{"role": "user", "content": user_msg}])
+        raw = self.reasoning_provider.chat(_SYSTEM_PROMPT, [{"role": "user", "content": user_msg}])
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -1312,7 +1352,7 @@ CURRENT PROJECTS:
             "Do not say 'temporary limitations' or blame the system. Do not show the raw error."
         )
         try:
-            return self.provider.chat(system, [{"role": "user", "content": message}])
+            return self.reasoning_provider.chat(system, [{"role": "user", "content": message}])
         except Exception:
             return "Something went wrong on my end. Could you clarify what you meant?"
 
@@ -1405,7 +1445,7 @@ remove one.]"""
                     f"{m['role']}: {m['content']}" for m in messages[-6:] if m.get("content")
                 )
                 range_start, range_end, range_label = _resolve_calendar_range(
-                    self.provider, last_user, today_str, convo_excerpt
+                    self.reasoning_provider, last_user, today_str, convo_excerpt
                 )
                 upcoming_rows = db.execute("""
                     SELECT e.id, e.title, e.start_datetime, e.end_datetime,
@@ -1479,7 +1519,7 @@ remove one.]"""
         # request even though the CURRENT TASKS block is already right there in
         # `system`. Bypass chat_with_tools entirely for this narrow, detected case.
         if last_user and _is_pure_task_listing(last_user):
-            reply = self.provider.chat(system, messages) or ""
+            reply = self.reasoning_provider.chat(system, messages) or ""
             return reply, _dedupe_sources(_chunks_to_sources(passive_chunks))
 
         # Agentic loop: keep executing tool calls until the model stops.
@@ -1625,7 +1665,7 @@ remove one.]"""
                     logger.exception("search_vault injection fallback failed")
                     ctx = ""
                 fresh_system = f"{base_system}\n\n{ctx}" if ctx else base_system
-                reply = self.provider.chat(fresh_system, messages) or ""
+                reply = self.reasoning_provider.chat(fresh_system, messages) or ""
                 return reply, _chunks_to_sources(chunks)
 
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "list_events":
@@ -1670,7 +1710,7 @@ remove one.]"""
                         lines.append(f"  [{t['id']}] {t['title']} | due:{t['due_date']} | priority:{t['priority']}")
                 ctx = "\n".join(lines)
                 fresh_system = f"{base_system}\n\n{ctx}"
-                reply = self.provider.chat(fresh_system, messages) or ""
+                reply = self.reasoning_provider.chat(fresh_system, messages) or ""
                 return reply, []  # calendar data, not vault content — no source citation
 
             if len(tool_calls) == 1 and tool_calls[0]["name"] == "read_document":
@@ -1690,7 +1730,7 @@ remove one.]"""
                         f"Tell the user the file was not found in the vault.]"
                     )
                 fresh_system = f"{base_system}\n\n{ctx}"
-                reply = self.provider.chat(fresh_system, messages) or ""
+                reply = self.reasoning_provider.chat(fresh_system, messages) or ""
                 sources = [{"source": tc["arguments"]["path"], "heading": ""}] if result.get("found") else []
                 return reply, sources
 
@@ -1705,7 +1745,7 @@ remove one.]"""
                 else:
                     ctx = f"[find_connections: {result.get('message') or result.get('error') or 'no connections found'}]"
                 fresh_system = f"{base_system}\n\n{ctx}"
-                reply = self.provider.chat(fresh_system, messages) or ""
+                reply = self.reasoning_provider.chat(fresh_system, messages) or ""
                 sources = (
                     [{"source": c["target"], "heading": ""} for c in result["connections"]]
                     if result.get("found") else []
@@ -1787,12 +1827,28 @@ remove one.]"""
                     "content": json.dumps(result),
                 })
 
+        # Falling out of the loop (rather than hitting one of the `return`s above)
+        # only happens when every one of the 5 rounds came back with at least one
+        # tool call — i.e. the model was still actively working through a multi-step
+        # request when its round budget ran out, not that it wrapped up naturally.
+        # The untooled call below just summarizes whatever fit in those 5 rounds; it
+        # has no way to know the user's original request wasn't fully satisfied
+        # (verified empirically: asked to create 1 task + 19 subtasks, it silently
+        # stopped after ~4 and gave a clean-sounding confirmation for those alone).
+        # Same "don't trust the model's own framing, check the facts" principle as
+        # the failures/fail_note check above — append a deterministic notice instead
+        # of relying on the model to volunteer that it ran out of room.
         final_reply = self.provider.chat(base_system, internal) or ""
+        incomplete_note = (
+            "\n\n(This reached the assistant's per-message tool-call limit before "
+            "finishing — if this was a large or multi-part request, some of it may "
+            "not be done. Send another message to have it continue.)"
+        )
         if final_reply:
-            return final_reply, _dedupe_sources(used_sources)
+            return final_reply + incomplete_note, _dedupe_sources(used_sources)
         if last_tool_results:
             reply = "\n".join(
                 _synthesize_tool_confirmation(n, a, r) for n, a, r in last_tool_results
             )
-            return reply, _dedupe_sources(used_sources)
-        return "", []
+            return reply + incomplete_note, _dedupe_sources(used_sources)
+        return incomplete_note.strip(), []

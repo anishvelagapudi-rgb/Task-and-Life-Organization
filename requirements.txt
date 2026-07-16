@@ -8,6 +8,7 @@ MarkupSafe==3.0.3
 Authlib==1.7.2
 google-genai==2.8.0
 groq==1.4.0
+openai>=1.0.0
 psycopg2-binary>=2.9
 pgvector>=0.3.6
 supabase>=2.9.0

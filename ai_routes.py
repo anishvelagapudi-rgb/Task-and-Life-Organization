@@ -1,11 +1,15 @@
 import hashlib
 import hmac
+import logging
 import os
-import httpx
 from flask import Blueprint, jsonify, request
 from db import get_db
+from services.ai.budget import BudgetExceededError
 from services.ai.gemini_provider import GeminiProvider
+from services.ai.nvidia_provider import NvidiaProvider
 from services.ai.service import AIService, has_pending_delete_marker
+
+logger = logging.getLogger(__name__)
 
 ai_bp = Blueprint("ai", __name__, url_prefix="/api/ai")
 
@@ -27,7 +31,10 @@ _service: AIService | None = None
 def _get_service() -> AIService:
     global _service
     if _service is None:
-        _service = AIService(GeminiProvider())
+        # Same hybrid split as app.py's browser-facing service — Gemini decides/
+        # executes every tool call, NvidiaProvider only handles tools-free
+        # reasoning/synthesis calls. See AIService.__init__'s docstring.
+        _service = AIService(GeminiProvider(), reasoning_provider=NvidiaProvider())
     return _service
 
 
@@ -39,8 +46,17 @@ def recommendations():
     """
     try:
         result = _get_service().get_recommendations(get_db())
-    except httpx.NetworkError:
-        return jsonify({"error": "AI service unreachable"}), 503
+    except BudgetExceededError as e:
+        return jsonify({"error": str(e)}), 429
+    except Exception:
+        # Previously only caught httpx.NetworkError, a Gemini/google-genai-specific
+        # exception type — a non-httpx-based provider (e.g. NvidiaProvider, on the
+        # openai SDK) failing the same way (empirically: a 504 from NVIDIA's gateway
+        # under a large tool-calling round) fell through uncaught, past this
+        # blueprint entirely, into Flask's bare default 500 with no JSON body —
+        # bad for a REST API contract every response elsewhere here honors.
+        logger.exception("AI recommendations failed")
+        return jsonify({"error": "AI service unavailable"}), 503
     return jsonify(result)
 
 
@@ -61,8 +77,13 @@ def chat():
 
     try:
         reply, sources = _get_service().chat(get_db(), messages)
-    except httpx.NetworkError:
-        return jsonify({"error": "AI service unreachable"}), 503
+    except BudgetExceededError as e:
+        return jsonify({"error": str(e)}), 429
+    except Exception:
+        # See the matching comment in recommendations() above — provider-agnostic on
+        # purpose, not narrowed to Gemini's own exception types.
+        logger.exception("AI chat failed")
+        return jsonify({"error": "AI service unavailable"}), 503
     # `reply` intentionally keeps any internal [ref: ...] delete-confirmation marker,
     # unlike app.py's browser route — this endpoint is stateless (see the docstring
     # above), so the caller is what persists/replays message history between turns,
