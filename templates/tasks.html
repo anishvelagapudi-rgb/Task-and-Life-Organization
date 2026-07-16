@@ -9,14 +9,14 @@
   </h1>
   <!-- tab toggle: List vs Tree -->
   <div style="display:flex; gap:6px; align-items:center;">
-    <button id="tab-list" class="btn-sm btn-active" onclick="switchTab('list')">List</button>
-    <button id="tab-tree" class="btn-ghost btn-sm" onclick="switchTab('tree')">Tree</button>
+    <button id="tab-list" class="btn-ghost btn-sm" onclick="switchTab('list')">List</button>
+    <button id="tab-tree" class="btn-sm btn-active" onclick="switchTab('tree')">Tree</button>
     {% include "_recurring_modal.html" %}
   </div>
 </div>
 
 <!-- ctrl-bar only shown in list view -->
-<div id="list-controls" class="ctrl-bar">
+<div id="list-controls" class="ctrl-bar" style="display:none;">
   <div class="filters">
     <select id="f-status" class="filter-select">
       <option value="">All Status</option>
@@ -62,9 +62,9 @@
 </div>
 
 <!-- ── list view ────────────────────────────────────────────────────────────── -->
-<div id="view-list">
+<div id="view-list" style="display:none;">
 
-{% if tasks %}
+{% if leaf_tasks %}
 <div class="section" style="margin-bottom:16px;">
   <table id="task-table" class="simple">
     <thead>
@@ -85,7 +85,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for task in tasks %}
+      {% for task in leaf_tasks %}
       <tr
         data-status="{{ task.status }}"
         data-priority="{{ task.priority }}"
@@ -96,7 +96,12 @@
         data-created="{{ task.created_at }}"
         data-fear="{{ task.fear_level or '' }}"
       >
-        <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
+        <td>
+          <a href="/tasks/{{ task.id }}">{{ task.title }}</a>
+          {% if task.parent_title %}
+          <span title="Subtask of &quot;{{ task.parent_title }}&quot;" style="display:block; font-size:11px; color:var(--muted);">↳ {{ task.parent_title }}</span>
+          {% endif %}
+        </td>
         <td><span class="badge {{ task.status }} status-badge">{{ task.status }}</span></td>
         <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
         <td>{{ task.due_date or '—' }}</td>
@@ -131,8 +136,11 @@
 
 </div> <!-- /view-list -->
 
-<!-- ── tree view ────────────────────────────────────────────────────────────── -->
-<div id="view-tree" style="display:none;">
+<!-- ── tree view (default) ─────────────────────────────────────────────────────── -->
+<div id="view-tree">
+  <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+    <button id="tree-uncollapse-toggle" class="btn-ghost btn-sm">Uncollapse All</button>
+  </div>
   <div class="card" style="padding:0;">
     <div id="tree-container"></div>
   </div>
@@ -427,26 +435,41 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// renders one node and all its descendants; visited guards against cycles
+// renders one node and all its descendants; visited guards against cycles.
+// children start collapsed (display:none) — a toggle arrow reveals them,
+// recursively, no matter how deep the tree goes.
 function renderNode(t, depth, visited) {
   if (visited.has(t.id)) return '';
   visited.add(t.id);
 
-  const indent = 8 + depth * 20;
-  let html = `<div class="tree-row" style="padding-left:${indent}px">`;
+  const kids    = childrenOf[t.id] || [];
+  const hasKids = kids.length > 0;
+  const indent  = 8 + depth * 20;
+
+  let html = `<div class="tree-node" data-id="${t.id}">`;
+  html += `<div class="tree-row" style="padding-left:${indent}px">`;
+  html += hasKids
+    ? `<button type="button" class="tree-toggle" aria-expanded="false">▶</button>`
+    : `<span class="tree-toggle-spacer"></span>`;
   if (depth > 0) html += '<span class="tree-connector">└─ </span>';
   html += `<a href="/tasks/${t.id}">${escHtml(t.title)}</a>`;
   html += ` <span class="badge ${t.status}">${t.status}</span>`;
   html += ` <span class="badge ${t.priority}">${t.priority}</span>`;
   html += '</div>';
 
-  for (const child of (childrenOf[t.id] || [])) {
-    html += renderNode(child, depth + 1, visited);
+  if (hasKids) {
+    html += '<div class="tree-children" style="display:none">';
+    for (const child of kids) {
+      html += renderNode(child, depth + 1, visited);
+    }
+    html += '</div>';
   }
+  html += '</div>';
   return html;
 }
 
 let treeRendered = false;
+let treeUncollapsed = false;
 
 function renderTree() {
   if (treeRendered) return; // only build the DOM once
@@ -460,9 +483,42 @@ function renderTree() {
     return;
   }
 
-  // render each root and its full subtree
+  // render each root and its full subtree (subtrees start collapsed)
   container.innerHTML = roots.map(r => renderNode(r, 0, new Set())).join('');
 }
+
+renderTree(); // Tree is the default tab — build it on page load, not just on first switch to it
+
+// click a node's ▶/▼ arrow to show/hide its direct children container —
+// works at any depth since each node's children are rendered as its own
+// (initially collapsed) tree-children div.
+document.getElementById('tree-container')?.addEventListener('click', e => {
+  const toggle = e.target.closest('.tree-toggle');
+  if (!toggle) return;
+  const node     = toggle.closest('.tree-node');
+  const children = node.querySelector(':scope > .tree-children');
+  if (!children) return;
+  const expanded = toggle.getAttribute('aria-expanded') === 'true';
+  children.style.display = expanded ? 'none' : '';
+  toggle.textContent = expanded ? '▶' : '▼';
+  toggle.setAttribute('aria-expanded', String(!expanded));
+});
+
+// "Uncollapse All" expands every node at every depth (the old always-expanded
+// tree view); clicking again re-collapses back to roots-only.
+document.getElementById('tree-uncollapse-toggle')?.addEventListener('click', function () {
+  renderTree(); // no-op if already rendered
+  treeUncollapsed = !treeUncollapsed;
+  const container = document.getElementById('tree-container');
+  container.querySelectorAll('.tree-children').forEach(el => {
+    el.style.display = treeUncollapsed ? '' : 'none';
+  });
+  container.querySelectorAll('.tree-toggle').forEach(el => {
+    el.textContent = treeUncollapsed ? '▼' : '▶';
+    el.setAttribute('aria-expanded', String(treeUncollapsed));
+  });
+  this.textContent = treeUncollapsed ? 'Collapse All' : 'Uncollapse All';
+});
 </script>
 
 {% endblock %}

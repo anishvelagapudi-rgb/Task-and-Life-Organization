@@ -247,14 +247,29 @@ def get_tasks():
         return redirect(url_for('login'))
     db = get_db()
     _reset_recurring(db)
-    tasks = db.execute("""
+    rows = db.execute("""
         SELECT t.*, p.title as project_title
         FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
         WHERE t.recurring IS NULL
         ORDER BY t.created_at DESC
     """).fetchall()
+    tasks = [parse_task(dict(r)) for r in rows]
+
+    # list view shows only "edge" tasks (no subtasks of their own) — tasks with
+    # children are only browsable via the Tree view. Leaves that do have a parent
+    # get a parent_title so the list view can still show what they belong to.
+    task_by_id = {t["id"]: t for t in tasks}
+    parent_ids = {t["parent_task_id"] for t in tasks if t.get("parent_task_id")}
+    leaf_tasks = []
+    for t in tasks:
+        if t["id"] in parent_ids:
+            continue
+        parent = task_by_id.get(t.get("parent_task_id"))
+        leaf_tasks.append({**t, "parent_title": parent["title"] if parent else None})
+
     return render_template("tasks.html",
-                           tasks=[parse_task(dict(r)) for r in tasks],
+                           tasks=tasks,
+                           leaf_tasks=leaf_tasks,
                            projects=all_projects())
 
 
