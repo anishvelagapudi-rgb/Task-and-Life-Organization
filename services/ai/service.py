@@ -129,7 +129,48 @@ BULK OR AMBIGUOUS REFERENCES ("all tasks", "all inbox tasks", "these three", "th
 - Only fall back to calling delete_task individually per task when the user names distinct tasks by their own separate titles (e.g. "delete 'Buy milk' and 'Pay rent'") — there's no shared pattern to give delete_tasks_matching there.
 - For deleting multiple PROJECTS or EVENTS on their own, or a mix of tasks/projects/events the user explicitly names together, call delete_project/delete_event/delete_task once per matching item — do not ask the user for confirmation yourself and do not hold back the calls.
 - A system-level safeguard automatically intercepts any request (via delete_task, delete_tasks_matching, delete_project, and/or delete_event, in any combination) that would delete more than one item total and asks the user to confirm before anything is actually removed, so you don't need to ask for confirmation yourself — attempting the delete calls normally is the correct behavior even for "delete all tasks" or "delete all my projects".
+
+TRAINING JOURNAL DATA:
+The user keeps a separate training journal (workouts, weight, runs, sleep, soreness/
+injury, mood/energy, etc.) — raw entries are never shown to you directly, only
+structured data already extracted from them.
+- Use query_training_data to answer any report or search question ("how many miles
+  this month", "show my bench progress", "find every time my knee hurt", "show all
+  long runs"). It returns real rows (with the original entry text attached) for you
+  to reason over — do the counting/summing/filtering yourself; there is no
+  pre-aggregated answer waiting for you.
+- Use export_training_data only when the user explicitly asks to export/download/save
+  their data as a file (CSV or Excel).
+- Use graph_training_metric only when the user explicitly asks to graph/plot/chart
+  something.
+- export_training_data and graph_training_metric both return a "url" field in their
+  result — when either succeeds, you MUST include that url verbatim, as plain text,
+  somewhere in your reply, so the user can open it. Never fabricate a url yourself;
+  only ever repeat one a tool actually returned.
+- Resolve relative dates ("this month", "last 2 weeks") yourself into YYYY-MM-DD
+  using today's date as the reference, the same way you already do for calendar
+  ranges — never ask the user to supply exact dates.
 """
+
+# base_system (built per-request in chat()) always starts with _SYSTEM_PROMPT
+# verbatim, so this derived prefix lets the query_training_data single-tool-call
+# shortcut below reuse base_system's *dynamic* suffix (current date, tasks,
+# projects, etc.) while dropping the "Use query_training_data/export_training_data/
+# graph_training_metric..." instructions -- those name real tools by name and tell
+# the model to "use" them, which is fine for the main tool-calling round but, fed
+# into this shortcut's tools-free reasoning_provider.chat() synthesis call (no
+# tools attached), reliably (6/6 in live testing, 2026-07-19) makes the model
+# hallucinate a text tool-call instead of writing a plain-language answer, tripping
+# nvidia_provider.py's tool-call-hallucination guard and returning its honest-
+# failure fallback text instead of a real answer.
+_TRAINING_TOOL_INSTRUCTIONS_MARKER = "\n\nTRAINING JOURNAL DATA:"
+_SYSTEM_PROMPT_NO_TRAINING_TOOLS = _SYSTEM_PROMPT[:_SYSTEM_PROMPT.index(_TRAINING_TOOL_INSTRUCTIONS_MARKER)].rstrip() + "\n"
+
+_TRAINING_METRIC_TYPES = {
+    "weight", "body_measurement", "nutrition", "sleep", "resting_hr",
+    "run", "workout_set", "soreness_injury", "mood_energy", "recovery",
+    "steps", "note",
+}
 
 TOOLS = [
     {
@@ -481,7 +522,134 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_training_data",
+            "description": (
+                "Look up structured training journal data (weight, runs, lifts, sleep, "
+                "resting heart rate, soreness/injury notes, mood/energy, etc.) to answer "
+                "reports or search requests like 'how many miles did I run this month', "
+                "'show my bench progress', 'find every time my knee hurt', 'show all long "
+                "runs'. Returns the matching rows (with the original journal entry text) "
+                "for you to reason over and summarize -- do the counting/summing/filtering "
+                "yourself from the returned rows rather than expecting pre-aggregated answers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": sorted(_TRAINING_METRIC_TYPES)},
+                        "description": "Restrict to these metric types, omit for all types",
+                    },
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD, omit for no lower bound"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD, omit for no upper bound"},
+                    "keyword": {
+                        "type": "string",
+                        "description": "Case-insensitive substring to match against the extracted data or the original entry text (e.g. 'knee')",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_training_data",
+            "description": "Export training journal data as a downloadable CSV or Excel file. Use when the user explicitly asks to export/download their data as a spreadsheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fmt": {"type": "string", "enum": ["csv", "xlsx"]},
+                    "metric_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": sorted(_TRAINING_METRIC_TYPES)},
+                        "description": "Restrict to these metric types, omit for all types",
+                    },
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD, omit for no lower bound"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD, omit for no upper bound"},
+                },
+                "required": ["fmt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "graph_training_metric",
+            "description": "Get a link to a chart of one training metric over time (e.g. 'graph my body weight'). Use for any explicit request to graph/plot/chart training data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric_type": {"type": "string", "enum": sorted(_TRAINING_METRIC_TYPES)},
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD, omit for no lower bound"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD, omit for no upper bound"},
+                },
+                "required": ["metric_type"],
+            },
+        },
+    },
 ]
+
+# ─── Training Journal extraction (Phase 1) ────────────────────────────────────
+
+_TRAINING_EXTRACTION_SYSTEM_PROMPT = """You extract structured fitness/health data from a
+user's raw training journal entries. You never invent facts -- only extract what the text
+actually states or strongly implies. Each entry may yield zero, one, or several structured
+items; an entry with nothing extractable (e.g. "Energy sucked today" alone with no other
+signal) can yield zero items -- that is correct, do not force an extraction.
+
+For every item you extract, call record_extractions with metric_type set to exactly one of:
+- weight: {"value_lbs": float}
+- body_measurement: {"part": str, "value_in": float}
+- nutrition: {"calories": float?, "protein_g": float?, "carbs_g": float?, "fat_g": float?}
+- sleep: {"hours": float}
+- resting_hr: {"bpm": float}
+- run: {"distance_mi": float, "duration_min": float?, "pace_min_per_mi": float?}
+- workout_set: {"exercise": str, "sets": int?, "reps": int?, "weight_lbs": float?}
+- soreness_injury: {"body_part": str, "note": str}
+- mood_energy: {"mood": str?, "energy": str?}
+- recovery: {"note": str}
+- steps: {"count": int}
+- note: {"text": str}  (fallback for anything relevant that doesn't fit another type)
+
+Rules:
+- source_entry_id must be exactly one of the entry ids given to you below -- never invent one.
+- confidence is a float 0-1: how directly the text states this value (an explicit number is
+  ~0.9-1.0; an inferred/implied value is lower).
+- One journal entry can produce multiple items of different or the same metric_type (e.g.
+  "Bench 185x5x3, then squats 225x5x3" is two workout_set items).
+- Numbers stay in the units the user wrote (assume lbs/miles/minutes unless stated otherwise).
+- Call record_extractions exactly once with every item from every entry in this batch."""
+
+_TRAINING_EXTRACTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "record_extractions",
+        "description": "Record every structured metric extracted from the given journal entries.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_entry_id": {"type": "string"},
+                            "metric_type": {"type": "string", "enum": sorted(_TRAINING_METRIC_TYPES)},
+                            "data": {"type": "object"},
+                            "confidence": {"type": "number"},
+                        },
+                        "required": ["source_entry_id", "metric_type", "data", "confidence"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+}
+
 
 _EVENT_WRITE_FIELDS = {
     "title", "description", "start_datetime", "end_datetime",
@@ -755,6 +923,8 @@ _TOOL_CONFIRM_VERBS = {
     "update_event": "Updated",
     "delete_event": "Deleted event",
     "create_note": "Saved note",
+    "export_training_data": "Exported your training data —",
+    "graph_training_metric": "Here's your chart —",
 }
 
 
@@ -763,6 +933,13 @@ def _synthesize_tool_confirmation(name: str, args: dict, result: dict) -> str:
     (documented elsewhere in this file for search_vault) — the action still went
     through, but the user would see a blank reply. Build a plain confirmation straight
     from the tool's actual result instead of leaving it empty or asking the model again."""
+    if result.get("url") and result.get("success", True):
+        # export_training_data/graph_training_metric: no meaningful title/id to
+        # confirm by name, just the url itself, which the user actually needs to
+        # act on this reply -- same "never let a blank reply hide a real tool
+        # result" motivation as the rest of this function.
+        verb = _TOOL_CONFIRM_VERBS.get(name, "Done —")
+        return f"{verb} {result['url']}"
     if not result.get("success", True):
         return f"That didn't work: {result.get('error', 'unknown error')}"
     label = result.get("title") or args.get("title") or result.get("id", "")
@@ -1024,6 +1201,45 @@ def _execute_tool(db, name: str, args: dict) -> dict:
         except Exception as e:
             logger.exception("find_connections tool failed")
             return {"found": False, "error": str(e)}
+
+    if name == "query_training_data":
+        from services.training import query as training_query
+        rows = training_query.query_rows(
+            db,
+            metric_types=args.get("metric_types"),
+            date_from=args.get("date_from"),
+            date_to=args.get("date_to"),
+            keyword=args.get("keyword"),
+        )
+        return {"rows": rows, "count": len(rows)}
+
+    if name == "export_training_data":
+        from services.training import query as training_query
+        from services.training import storage as training_storage
+        rows = training_query.query_rows(
+            db,
+            metric_types=args.get("metric_types"),
+            date_from=args.get("date_from"),
+            date_to=args.get("date_to"),
+        )
+        content, content_type, ext = training_query.export_rows(rows, args.get("fmt", "csv"))
+        key = f"exports/{uuid.uuid4()}.{ext}"
+        training_storage.upload(key, content, content_type)
+        url = training_storage.signed_url(key, expires_in=3600)
+        return {"success": True, "url": url, "row_count": len(rows)}
+
+    if name == "graph_training_metric":
+        # Built from the current request's own host -- _execute_tool only ever runs
+        # inside chat(), only ever called from an actual HTTP request in app.py, so a
+        # request context is always active here.
+        from flask import url_for
+        metric_type = args.get("metric_type", "")
+        url = url_for(
+            "training_chart", metric_type=metric_type,
+            date_from=args.get("date_from"), date_to=args.get("date_to"),
+            _external=True,
+        )
+        return {"success": True, "url": url, "metric_type": metric_type}
 
     return {"success": False, "error": f"Unknown tool: {name}"}
 
@@ -1355,6 +1571,27 @@ CURRENT PROJECTS:
             return self.reasoning_provider.chat(system, [{"role": "user", "content": message}])
         except Exception:
             return "Something went wrong on my end. Could you clarify what you meant?"
+
+    def extract_training_metrics(self, entries: list[dict]) -> list[dict]:
+        """entries: [{"id": str, "content": str}, ...]. Returns whatever items the
+        model reported via record_extractions, raw (caller -- services/training/
+        extraction.py -- is responsible for validating source_entry_id/metric_type/
+        confidence before writing anything to the DB, same lenient-drop-don't-trust
+        pattern as db.py's enforce_* invariants). Runs on self.provider (the
+        tool-decider), not reasoning_provider -- this is a real tool call, not one
+        of the tools-free synthesis calls reasoning_provider is scoped to."""
+        entry_block = "\n".join(f'- id={e["id"]}: "{e["content"]}"' for e in entries)
+        user_msg = f"Journal entries to extract from:\n{entry_block}"
+        _, tool_calls = self.provider.chat_with_tools(
+            _TRAINING_EXTRACTION_SYSTEM_PROMPT,
+            [{"role": "user", "content": user_msg}],
+            [_TRAINING_EXTRACTION_TOOL],
+        )
+        items = []
+        for tc in tool_calls:
+            if tc["name"] == "record_extractions":
+                items.extend(tc["arguments"].get("items") or [])
+        return items
 
     def chat(self, db, messages: list[dict], client_tz: str | None = None) -> tuple[str, list[dict]]:
         # Every task regardless of status, not just inbox/active — the chat context
@@ -1751,6 +1988,34 @@ remove one.]"""
                     if result.get("found") else []
                 )
                 return reply, sources
+
+            if len(tool_calls) == 1 and tool_calls[0]["name"] == "query_training_data":
+                tc = tool_calls[0]
+                result = _execute_tool(db, "query_training_data", tc["arguments"])
+                rows = result.get("rows", [])
+                if rows:
+                    lines = [f"TRAINING DATA ({len(rows)} rows):"]
+                    for r in rows:
+                        data_str = ", ".join(f"{k}={v}" for k, v in (r.get("data") or {}).items())
+                        entry = (r.get("entry_content") or "")[:120]
+                        lines.append(
+                            f"  {r['entry_date']} | {r['metric_type']} | {data_str} "
+                            f"| confidence={r['confidence']} | entry: \"{entry}\""
+                        )
+                    ctx = "\n".join(lines)
+                else:
+                    ctx = "[query_training_data: no matching rows for this query.]"
+                # _SYSTEM_PROMPT_NO_TRAINING_TOOLS (not base_system) -- see its docstring:
+                # the "Use query_training_data/..." tool instructions in the full prompt
+                # reliably trigger a hallucinated text tool-call in this tools-free call.
+                fresh_system = f"{_SYSTEM_PROMPT_NO_TRAINING_TOOLS}{base_system[len(_SYSTEM_PROMPT):]}\n\n{ctx}"
+                reply = self.reasoning_provider.chat(fresh_system, messages) or ""
+                if reply.startswith("Something went wrong processing that"):
+                    # Bounded retry as a second line of defense, same pattern already used
+                    # in services/training/extraction.py -- the prompt fix above addresses
+                    # the reliable repro case, this just covers ordinary residual flakiness.
+                    reply = self.reasoning_provider.chat(fresh_system, messages) or ""
+                return reply, []
 
             # Drop passive RAG context for subsequent rounds — tool results already
             # provide the context and the combined injection causes empty Gemini responses.

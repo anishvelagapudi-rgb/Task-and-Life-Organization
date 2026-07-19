@@ -7,10 +7,10 @@
     Tasks
     <span id="task-count" style="font-size:13px; font-weight:400; color:var(--muted); margin-left:8px;"></span>
   </h1>
-  <!-- tab toggle: List vs Tree -->
+  <!-- tab toggle: Tree vs List (Tree is the default view) -->
   <div style="display:flex; gap:6px; align-items:center;">
-    <button id="tab-list" class="btn-ghost btn-sm" onclick="switchTab('list')">List</button>
     <button id="tab-tree" class="btn-sm btn-active" onclick="switchTab('tree')">Tree</button>
+    <button id="tab-list" class="btn-ghost btn-sm" onclick="switchTab('list')">List</button>
     {% include "_recurring_modal.html" %}
   </div>
 </div>
@@ -87,6 +87,7 @@
     <tbody>
       {% for task in leaf_tasks %}
       <tr
+        data-task-row="{{ task.id }}"
         data-status="{{ task.status }}"
         data-priority="{{ task.priority }}"
         data-energy="{{ task.energy_type or '' }}"
@@ -298,6 +299,10 @@
     if (countEl) countEl.textContent = `${visible.length} task${visible.length !== 1 ? 's' : ''}`;
   }
 
+  // exposed so toggleComplete() below can re-filter after a status flip, and
+  // so it can check whether a status filter is currently active
+  window.applyTaskFilters = apply;
+
   document.getElementById('sort-by').addEventListener('change', function () {
     sortField = this.value;
     apply();
@@ -346,10 +351,13 @@
   });
 })();
 
-// ── complete task (list view) ────────────────────────────────────────────────
+// ── complete / delete a task (works from either the List row or a Tree row —
+// the same task can have a live copy in both, since both are rendered up front
+// and just toggled with CSS) ─────────────────────────────────────────────────
 
-// toggles a task between done and inbox without a page reload.
-// the server returns {status: 'done'|'inbox'} so we know which direction it went.
+// toggles a task between done and inbox without a page reload. the server
+// returns {status: 'done'|'inbox'} so we know which direction it went. updates
+// every DOM copy of this task (list row + tree row, if present).
 function toggleComplete(btn, taskId) {
   fetch(`/tasks/${taskId}/complete`, {
     method: 'POST',
@@ -357,16 +365,29 @@ function toggleComplete(btn, taskId) {
   })
   .then(r => r.json())
   .then(data => {
-    const row = btn.closest('tr');
-    row.dataset.status = data.status;           // drives green-row CSS and filter logic
-    const badge = row.querySelector('.status-badge');
-    badge.className   = `badge ${data.status} status-badge`;
-    badge.textContent = data.status;
-    btn.textContent   = data.status === 'done' ? '↩' : '✓';  // flip the button symbol
+    document.querySelectorAll(`[data-task-row="${taskId}"]`).forEach(row => {
+      row.dataset.status = data.status; // drives green-row CSS and filter logic
+      const badge = row.querySelector('.status-badge');
+      if (badge) { badge.className = `badge ${data.status} status-badge`; badge.textContent = data.status; }
+      const completeBtn = row.querySelector('.js-toggle-complete');
+      if (completeBtn) completeBtn.textContent = data.status === 'done' ? '↩' : '✓';
+    });
+
+    // list view: unless a status filter is narrowing what's shown, sink a
+    // newly-completed task to the bottom instead of leaving it in sort order
+    const listRow = document.querySelector(`#task-table tr[data-task-row="${taskId}"]`);
+    if (listRow) {
+      const statusFilter = document.getElementById('f-status')?.value;
+      if (statusFilter) {
+        window.applyTaskFilters?.(); // let normal filtering show/hide it
+      } else if (data.status === 'done') {
+        const tbody = listRow.closest('tbody');
+        const emptyRow = document.getElementById('empty-row');
+        tbody.insertBefore(listRow, emptyRow);
+      }
+    }
   });
 }
-
-// ── delete task (list view) ──────────────────────────────────────────────────
 
 function deleteTask(btn, taskId) {
   if (!confirm('Delete this task? This cannot be undone.')) return;
@@ -375,15 +396,21 @@ function deleteTask(btn, taskId) {
     headers: { 'X-Requested-With': 'fetch' }
   })
   .then(() => {
-    const tbody = btn.closest('tbody');
-    btn.closest('tr').remove();
+    document.querySelectorAll(`[data-task-row="${taskId}"]`).forEach(row => {
+      // a tree row's deletable unit is its whole .tree-node (row + subtree);
+      // a list <tr> is deletable on its own.
+      (row.closest('.tree-node') || row).remove();
+    });
 
-    const countEl = document.getElementById('task-count');
-    const remaining = tbody.querySelectorAll('tr:not([data-system])').length;
-    if (countEl) countEl.textContent = `${remaining} task${remaining !== 1 ? 's' : ''}`;
+    const tbody = document.querySelector('#task-table tbody');
+    if (tbody) {
+      const countEl = document.getElementById('task-count');
+      const remaining = tbody.querySelectorAll('tr:not([data-system])').length;
+      if (countEl) countEl.textContent = `${remaining} task${remaining !== 1 ? 's' : ''}`;
 
-    const emptyRow = document.getElementById('empty-row');
-    if (remaining === 0 && emptyRow) emptyRow.style.display = '';
+      const emptyRow = document.getElementById('empty-row');
+      if (remaining === 0 && emptyRow) emptyRow.style.display = '';
+    }
   });
 }
 
@@ -423,10 +450,14 @@ const ALL_TASKS = {{ tasks | tojson }};
 const taskById   = {};
 const childrenOf = {};
 
+ALL_TASKS.forEach(t => { taskById[t.id] = t; });
 ALL_TASKS.forEach(t => {
-  taskById[t.id] = t;
-  // null key = root-level tasks (no parent)
-  const pid = t.parent_task_id ?? null;
+  // null key = root-level tasks. Also treated as root: a task whose
+  // parent_task_id points at something not in this page's task set (e.g. a
+  // parent excluded by a status filter upstream) — otherwise it would be
+  // unreachable from any rendered root.
+  let pid = t.parent_task_id ?? null;
+  if (pid && !taskById[pid]) pid = null;
   if (!childrenOf[pid]) childrenOf[pid] = [];
   childrenOf[pid].push(t);
 });
@@ -447,14 +478,18 @@ function renderNode(t, depth, visited) {
   const indent  = 8 + depth * 20;
 
   let html = `<div class="tree-node" data-id="${t.id}">`;
-  html += `<div class="tree-row" style="padding-left:${indent}px">`;
+  html += `<div class="tree-row" data-task-row="${t.id}" data-status="${t.status}" style="padding-left:${indent}px">`;
   html += hasKids
     ? `<button type="button" class="tree-toggle" aria-expanded="false">▶</button>`
     : `<span class="tree-toggle-spacer"></span>`;
   if (depth > 0) html += '<span class="tree-connector">└─ </span>';
   html += `<a href="/tasks/${t.id}">${escHtml(t.title)}</a>`;
-  html += ` <span class="badge ${t.status}">${t.status}</span>`;
+  html += ` <span class="badge ${t.status} status-badge">${t.status}</span>`;
   html += ` <span class="badge ${t.priority}">${t.priority}</span>`;
+  html += '<span class="tree-actions">';
+  html += `<button type="button" class="js-toggle-complete" data-id="${t.id}" title="Toggle complete">${t.status === 'done' ? '↩' : '✓'}</button>`;
+  html += `<button type="button" class="js-delete-task" data-id="${t.id}" title="Delete task">🗑</button>`;
+  html += '</span>';
   html += '</div>';
 
   if (hasKids) {
@@ -494,14 +529,22 @@ renderTree(); // Tree is the default tab — build it on page load, not just on 
 // (initially collapsed) tree-children div.
 document.getElementById('tree-container')?.addEventListener('click', e => {
   const toggle = e.target.closest('.tree-toggle');
-  if (!toggle) return;
-  const node     = toggle.closest('.tree-node');
-  const children = node.querySelector(':scope > .tree-children');
-  if (!children) return;
-  const expanded = toggle.getAttribute('aria-expanded') === 'true';
-  children.style.display = expanded ? 'none' : '';
-  toggle.textContent = expanded ? '▶' : '▼';
-  toggle.setAttribute('aria-expanded', String(!expanded));
+  if (toggle) {
+    const node     = toggle.closest('.tree-node');
+    const children = node.querySelector(':scope > .tree-children');
+    if (!children) return;
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    children.style.display = expanded ? 'none' : '';
+    toggle.textContent = expanded ? '▶' : '▼';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    return;
+  }
+
+  const completeBtn = e.target.closest('.js-toggle-complete');
+  if (completeBtn) return toggleComplete(completeBtn, completeBtn.dataset.id);
+
+  const deleteBtn = e.target.closest('.js-delete-task');
+  if (deleteBtn) return deleteTask(deleteBtn, deleteBtn.dataset.id);
 });
 
 // "Uncollapse All" expands every node at every depth (the old always-expanded

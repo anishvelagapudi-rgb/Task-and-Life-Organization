@@ -1,0 +1,526 @@
+{% extends "layout.html" %}
+{% block title %}Training Journal — {{ entry_date }}{% endblock %}
+{% block content %}
+
+<style>
+  .chat-wrap {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-shrink: 0;
+  }
+
+  .chat-header-title { flex: 1; min-width: 0; }
+  .chat-header-title h1 { margin-bottom: 0; font-size: 18px; }
+  .chat-header-title .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .chat-header-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+  .chat-history {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 4px 0 16px;
+  }
+
+  .msg {
+    position: relative;
+    max-width: 84%;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    align-self: flex-end;
+    background: #1e2e45;
+    border: 1px solid #2a4060;
+    color: var(--text);
+  }
+
+  .msg .ts {
+    display: block;
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .msg-delete {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    opacity: 0;
+    transition: opacity 0.1s;
+    background: transparent;
+    border: 1px solid var(--danger, #e05252);
+    color: var(--danger, #e05252);
+    padding: 1px 5px;
+    font-size: 10px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .msg:hover .msg-delete { opacity: 1; }
+
+  .msg-edit {
+    position: absolute;
+    top: 4px;
+    right: 28px;
+    opacity: 0;
+    transition: opacity 0.1s;
+    background: transparent;
+    border: 1px solid var(--muted);
+    color: var(--muted);
+    padding: 1px 5px;
+    font-size: 10px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .msg:hover .msg-edit { opacity: 1; }
+  .msg-edit:hover { border-color: var(--accent); color: var(--accent); }
+
+  .msg-edit-row {
+    display: flex;
+    gap: 6px;
+    align-items: flex-end;
+    margin-top: 4px;
+  }
+  .msg-edit-row textarea {
+    flex: 1;
+    resize: vertical;
+    min-height: 44px;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 6px 8px;
+    border-radius: 4px;
+  }
+  .msg-edit-row button { font-size: 11px; padding: 4px 8px; border-radius: 4px; }
+
+  .msg-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .msg-attachments img {
+    max-width: 140px;
+    max-height: 140px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .msg-attachments .att-file {
+    font-size: 11px;
+    color: var(--accent);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+  }
+
+  .sys-msg {
+    align-self: center;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+
+  .chat-input-row {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    align-items: flex-end;
+  }
+
+  #entry-input {
+    flex: 1;
+    resize: none;
+    height: 44px;
+    max-height: 40vh;
+    line-height: 1.5;
+    padding: 10px 12px;
+    font-size: 14px;
+    border-radius: 6px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+
+  #send-btn { height: 44px; padding: 0 20px; border-radius: 6px; font-size: 13px; }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #attach-btn {
+    height: 44px;
+    width: 44px;
+    padding: 0;
+    border-radius: 6px;
+    font-size: 18px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #attach-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #attach-file { display: none; }
+
+  .pending-files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .pending-files .chip {
+    font-size: 11px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pending-files .chip button {
+    background: none;
+    border: none;
+    color: var(--danger);
+    cursor: pointer;
+    padding: 0;
+    font-size: 11px;
+  }
+</style>
+
+<div class="chat-wrap">
+  <div class="chat-header">
+    <div class="chat-header-title">
+      <h1>{{ 'Today' if is_today else entry_date }}</h1>
+      <div class="sub">
+        {{ entry_date }}
+        {% if not is_today %} · <a href="/training" style="color:var(--muted);">→ Today</a>{% endif %}
+      </div>
+    </div>
+    <div class="chat-header-actions">
+      <form method="POST" action="/chat/new?title=Training%20Journal%20Q%26A" style="margin:0;">
+        <button type="submit" class="btn btn-ghost btn-sm">Ask about your training</button>
+      </form>
+      <a href="/training/dashboard" class="btn btn-ghost btn-sm">Dashboard</a>
+    </div>
+  </div>
+
+  <div class="chat-history" id="history">
+    {% for e in entries %}
+    <div class="msg" data-entry-id="{{ e.id }}" data-content="{{ e.content }}">
+      {% if is_today %}
+      <button type="button" class="msg-edit" title="Edit this entry" onclick="editEntry('{{ e.id }}')">✎</button>
+      <button type="button" class="msg-delete" title="Delete this entry" onclick="deleteEntry('{{ e.id }}', this)">✕</button>
+      {% endif %}
+      <span class="msg-text">{{ e.content }}</span>
+      {% if e.attachments %}
+      <div class="msg-attachments">
+        {% for a in e.attachments %}
+          {% if a.content_type and a.content_type.startswith('image/') and a.url %}
+          <a href="{{ a.url }}" target="_blank"><img src="{{ a.url }}" alt="{{ a.filename }}"></a>
+          {% else %}
+          <a class="att-file" href="{{ a.url }}" target="_blank">📎 {{ a.filename }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+      <span class="ts" data-ts="{{ e.created_at }}"></span>
+    </div>
+    {% endfor %}
+    {% if not entries %}
+    <div class="sys-msg">{{ 'No entries yet — log anything: weight, a run, a lift, how you feel.' if is_today else 'No entries this day.' }}</div>
+    {% endif %}
+  </div>
+
+  {% if not readonly %}
+  <div class="chat-input-row" style="flex-direction: column; align-items: stretch;">
+    <div class="pending-files" id="pending-files"></div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <button id="attach-btn" type="button" title="Attach a photo or PDF" onclick="document.getElementById('attach-file').click()">📎</button>
+      <input type="file" id="attach-file" multiple accept=".jpg,.jpeg,.png,.heic,.pdf" onchange="addPendingFiles(this.files)">
+      <textarea id="entry-input" placeholder="Log anything — weight, a run, a lift, how you feel…"></textarea>
+      <button id="send-btn" type="button" onclick="sendEntry()">Send</button>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+  const historyEl = document.getElementById('history');
+  const inputEl   = document.getElementById('entry-input');
+  const sendBtn   = document.getElementById('send-btn');
+  let pendingFiles = [];
+
+  function formatTs(iso) {
+    try {
+      return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    } catch (e) { return ''; }
+  }
+
+  function renderTimestamps(root) {
+    root.querySelectorAll('.ts[data-ts]').forEach(el => {
+      if (!el.textContent) el.textContent = formatTs(el.getAttribute('data-ts'));
+    });
+  }
+  renderTimestamps(document);
+
+  function appendSys(text) {
+    const div = document.createElement('div');
+    div.className = 'sys-msg';
+    div.textContent = text;
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+
+  async function deleteEntry(entryId, btn) {
+    // Single-item delete via a plain POST — a different, lower-risk code path
+    // than the bulk multi-item chat delete flow, so window.confirm() here is
+    // fine (see README on the disabled bulk-delete confirm dialog).
+    if (!window.confirm('Delete this entry? This cannot be undone.')) return;
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/training/entry/${entryId}/delete`, { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || data.error) {
+        appendSys('Delete failed: ' + (data && data.error ? data.error : res.status));
+        btn.disabled = false;
+        return;
+      }
+      const bubble = historyEl.querySelector(`[data-entry-id="${entryId}"]`);
+      if (bubble) bubble.remove();
+      if (!historyEl.querySelector('.msg')) {
+        appendSys('No entries yet — log anything: weight, a run, a lift, how you feel.');
+      }
+    } catch (err) {
+      appendSys('Network error: ' + err.message);
+      btn.disabled = false;
+    }
+  }
+
+  function editEntry(entryId) {
+    const bubble = historyEl.querySelector(`[data-entry-id="${entryId}"]`);
+    if (!bubble || bubble.querySelector('.msg-edit-row')) return; // already editing
+
+    const textSpan = bubble.querySelector('.msg-text');
+    const editBtn = bubble.querySelector('.msg-edit');
+    const delBtn = bubble.querySelector('.msg-delete');
+    textSpan.style.display = 'none';
+    if (editBtn) editBtn.style.display = 'none';
+    if (delBtn) delBtn.style.display = 'none';
+
+    const row = document.createElement('div');
+    row.className = 'msg-edit-row';
+
+    const ta = document.createElement('textarea');
+    ta.value = bubble.getAttribute('data-content') || '';
+    row.appendChild(ta);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-sm';
+    saveBtn.textContent = 'Save';
+    saveBtn.onclick = () => saveEdit(entryId);
+    row.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-ghost btn-sm';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = () => cancelEdit(entryId);
+    row.appendChild(cancelBtn);
+
+    textSpan.insertAdjacentElement('afterend', row);
+
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(entryId); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(entryId); }
+    });
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  function cancelEdit(entryId) {
+    const bubble = historyEl.querySelector(`[data-entry-id="${entryId}"]`);
+    if (!bubble) return;
+    const row = bubble.querySelector('.msg-edit-row');
+    if (row) row.remove();
+    const textSpan = bubble.querySelector('.msg-text');
+    if (textSpan) textSpan.style.display = '';
+    const editBtn = bubble.querySelector('.msg-edit');
+    const delBtn = bubble.querySelector('.msg-delete');
+    if (editBtn) editBtn.style.display = '';
+    if (delBtn) delBtn.style.display = '';
+  }
+
+  async function saveEdit(entryId) {
+    const bubble = historyEl.querySelector(`[data-entry-id="${entryId}"]`);
+    if (!bubble) return;
+    const row = bubble.querySelector('.msg-edit-row');
+    const ta = row.querySelector('textarea');
+    const saveBtn = row.querySelector('button');
+    const content = ta.value.trim();
+    if (!content) return;
+
+    saveBtn.disabled = true;
+    try {
+      const res = await fetch(`/training/entry/${entryId}/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || data.error) {
+        appendSys('Edit failed: ' + (data && data.error ? data.error : res.status));
+        saveBtn.disabled = false;
+        return;
+      }
+      bubble.setAttribute('data-content', data.content);
+      bubble.querySelector('.msg-text').textContent = data.content;
+      cancelEdit(entryId);
+    } catch (err) {
+      appendSys('Network error: ' + err.message);
+      saveBtn.disabled = false;
+    }
+  }
+
+  function appendEntry(entry) {
+    const placeholder = historyEl.querySelector('.sys-msg');
+    if (placeholder) placeholder.remove();
+
+    const div = document.createElement('div');
+    div.className = 'msg';
+    div.setAttribute('data-entry-id', entry.id);
+    div.setAttribute('data-content', entry.content || '');
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'msg-edit';
+    editBtn.title = 'Edit this entry';
+    editBtn.textContent = '✎';
+    editBtn.onclick = () => editEntry(entry.id);
+    div.appendChild(editBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'msg-delete';
+    delBtn.title = 'Delete this entry';
+    delBtn.textContent = '✕';
+    delBtn.onclick = () => deleteEntry(entry.id, delBtn);
+    div.appendChild(delBtn);
+
+    const textSpan = document.createElement('span');
+    textSpan.className = 'msg-text';
+    textSpan.textContent = entry.content || '';
+    div.appendChild(textSpan);
+
+    if (entry.attachments && entry.attachments.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-attachments';
+      for (const a of entry.attachments) {
+        const chip = document.createElement('span');
+        chip.className = 'att-file';
+        chip.textContent = '📎 ' + a.filename;
+        wrap.appendChild(chip);
+      }
+      div.appendChild(wrap);
+    }
+
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.setAttribute('data-ts', entry.created_at);
+    ts.textContent = formatTs(entry.created_at);
+    div.appendChild(ts);
+
+    historyEl.appendChild(div);
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+
+  function renderPendingFiles() {
+    const wrap = document.getElementById('pending-files');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    pendingFiles.forEach((f, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      const label = document.createElement('span');
+      label.textContent = f.name;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = '✕';
+      remove.onclick = () => { pendingFiles.splice(i, 1); renderPendingFiles(); };
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      wrap.appendChild(chip);
+    });
+  }
+
+  function addPendingFiles(fileList) {
+    for (const f of fileList) pendingFiles.push(f);
+    renderPendingFiles();
+    document.getElementById('attach-file').value = '';
+  }
+
+  async function sendEntry() {
+    const text = inputEl.value.trim();
+    if (!text && !pendingFiles.length) return;
+
+    sendBtn.disabled = true;
+    const fd = new FormData();
+    fd.append('content', text);
+    fd.append('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
+    for (const f of pendingFiles) fd.append('file', f);
+
+    try {
+      const res = await fetch('/training/entry', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || data.error) {
+        appendSys('Error: ' + (data && data.error ? data.error : `Server error (${res.status})`));
+      } else {
+        appendEntry(data);
+        inputEl.value = '';
+        autoResize();
+        pendingFiles = [];
+        renderPendingFiles();
+      }
+    } catch (err) {
+      appendSys('Network error: ' + err.message);
+    }
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
+  if (inputEl) {
+    inputEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendEntry();
+      }
+    });
+    function autoResize() {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.4) + 'px';
+    }
+    inputEl.addEventListener('input', autoResize);
+    inputEl.focus();
+  }
+
+  historyEl.scrollTop = historyEl.scrollHeight;
+</script>
+
+{% endblock %}

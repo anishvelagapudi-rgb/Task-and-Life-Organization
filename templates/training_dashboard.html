@@ -1,0 +1,182 @@
+{% extends "layout.html" %}
+{% block title %}Training Dashboard{% endblock %}
+{% block content %}
+
+<style>
+  :root {
+    --chart-1: #3987e5; /* blue */
+    --chart-2: #008300; /* green */
+    --chart-3: #d55181; /* magenta */
+    --chart-4: #c98500; /* yellow */
+    --chart-5: #199e70; /* aqua */
+    --chart-6: #d95926; /* orange */
+    --chart-7: #9085e9; /* violet */
+    --chart-8: #e66767; /* red */
+  }
+
+  .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .page-header h1 { margin-bottom: 0; }
+
+  .stat-row { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-tile {
+    flex: 1;
+    min-width: 160px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+  }
+  .stat-tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+  .stat-tile .value { font-size: 22px; font-weight: 600; }
+  .stat-tile .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+  .chart-card h2 { margin-bottom: 8px; }
+  .chart-empty { color: var(--muted); font-size: 13px; padding: 20px 0; }
+
+  .insight-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .insight-list li {
+    font-size: 13px;
+    padding: 8px 12px;
+    border-left: 2px solid var(--accent);
+    background: var(--bg);
+    border-radius: 0 4px 4px 0;
+  }
+
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; }
+  .chart-legend .item { display: flex; align-items: center; gap: 6px; color: var(--text); }
+  .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  svg.chart { width: 100%; height: auto; overflow: visible; }
+  svg.chart text { fill: var(--muted); font-size: 10px; }
+  svg.chart .gridline { stroke: var(--border); stroke-width: 1; }
+  svg.chart .mark-point { cursor: pointer; }
+
+  .table-toggle {
+    background: none; border: none; color: var(--accent); font-size: 12px;
+    cursor: pointer; padding: 0; margin-top: 8px;
+  }
+  table.chart-table { margin-top: 10px; font-size: 12px; }
+  table.chart-table th, table.chart-table td { padding: 4px 8px; }
+
+  #chart-tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text);
+    display: none;
+    z-index: 50;
+  }
+</style>
+
+<div class="page-header">
+  <h1>Training Dashboard</h1>
+  <form method="POST" action="/chat/new?title=Training%20Journal%20Q%26A" style="margin:0;">
+    <button type="submit" class="btn btn-ghost btn-sm">Ask about your training</button>
+  </form>
+</div>
+
+{% if processed_count %}
+<div class="sys-note" style="font-size:12px;color:var(--muted);margin-bottom:16px;">
+  Processed {{ processed_count }} new journal {{ 'entry' if processed_count == 1 else 'entries' }} just now.
+</div>
+{% endif %}
+
+<div class="stat-row">
+  <div class="stat-tile">
+    <div class="label">Current weight</div>
+    {% if weight_points %}
+    <div class="value">{{ '%.1f'|format(weight_points[-1].value_lbs) }} lbs</div>
+    <div class="sub">as of {{ weight_points[-1].date }}</div>
+    {% else %}
+    <div class="value">—</div>
+    <div class="sub">no weight logged yet</div>
+    {% endif %}
+  </div>
+  <div class="stat-tile">
+    <div class="label">This week's mileage</div>
+    {% if mileage_points %}
+    <div class="value">{{ mileage_points[-1].miles }} mi</div>
+    <div class="sub">{{ mileage_points[-1].week }}</div>
+    {% else %}
+    <div class="value">—</div>
+    <div class="sub">no runs logged yet</div>
+    {% endif %}
+  </div>
+  <div class="stat-tile">
+    <div class="label">Lifts tracked</div>
+    <div class="value">{{ one_rm_by_exercise|length }}</div>
+    <div class="sub">estimated 1RM, Epley formula</div>
+  </div>
+</div>
+
+{% if insights %}
+<div class="chart-card">
+  <h2>Insights</h2>
+  <ul class="insight-list">
+    {% for i in insights %}
+    <li>{{ i.message }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="chart-card">
+  <h2>Weight trend</h2>
+  <div id="weight-chart"></div>
+</div>
+
+<div class="chart-card">
+  <h2>Weekly mileage</h2>
+  <div id="mileage-chart"></div>
+</div>
+
+<div class="chart-card">
+  <h2>Estimated 1RM by lift</h2>
+  <div id="onerm-chart"></div>
+</div>
+
+{% if other_rows %}
+<div class="chart-card">
+  <h2>Recent extractions</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Type</th><th>Data</th><th>Confidence</th></tr></thead>
+    <tbody>
+      {% for r in other_rows %}
+      <tr>
+        <td>{{ r.entry_date }}</td>
+        <td>{{ r.metric_type }}</td>
+        <td>{{ r.data }}</td>
+        <td>{{ '%.0f'|format(r.confidence * 100) }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div id="chart-tooltip"></div>
+
+<script src="{{ url_for('static', filename='training-charts.js') }}"></script>
+<script>
+  const WEIGHT_POINTS  = {{ weight_points | tojson }};
+  const MILEAGE_POINTS = {{ mileage_points | tojson }};
+  const ONE_RM_BY_EX   = {{ one_rm_by_exercise | tojson }};
+  const CHART_COLORS   = TrainingCharts.colors();
+
+  TrainingCharts.renderLineChart('weight-chart', WEIGHT_POINTS, 'date', 'value_lbs', CHART_COLORS[0], 'lbs', ['date', 'value_lbs']);
+  TrainingCharts.renderBarChart('mileage-chart', MILEAGE_POINTS, 'week', 'miles', CHART_COLORS[0], 'mi', ['week', 'miles']);
+  TrainingCharts.renderMultiLineChart('onerm-chart', ONE_RM_BY_EX);
+</script>
+
+{% endblock %}

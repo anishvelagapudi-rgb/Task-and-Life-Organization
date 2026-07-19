@@ -55,33 +55,70 @@
 </div>
 
 <div class="section">
-  <h2>Active &amp; Inbox</h2>
-  {% if active_tasks %}
-  <table>
-    <thead>
-      <tr>
-        <th>Title</th>
-        <th>Priority</th>
-        <th>Energy</th>
-        <th>Due</th>
-        <th>Project</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for task in active_tasks %}
-      <tr>
-        <td><a href="/tasks/{{ task.id }}">{{ task.title }}</a></td>
-        <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
-        <td><span class="badge">{{ task.energy_type or '—' }}</span></td>
-        <td>{{ task.due_date or '—' }}</td>
-        <td>{{ task.project_title or '—' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="empty">No active tasks.</p>
-  {% endif %}
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+    <h2 style="margin:0;">Active &amp; Inbox</h2>
+    <div style="display:flex; gap:6px; align-items:center;">
+      <button id="dash-tab-tree" class="btn-sm btn-active" onclick="switchDashTab('tree')">Tree</button>
+      <button id="dash-tab-list" class="btn-ghost btn-sm" onclick="switchDashTab('list')">List</button>
+    </div>
+  </div>
+
+  <!-- ── list view: edges of the tree only (tasks with subtasks are Tree-only) ── -->
+  <div id="dash-view-list" style="display:none;">
+    {% if active_leaf_tasks %}
+    <table id="dash-task-table">
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Status</th>
+          <th>Priority</th>
+          <th>Energy</th>
+          <th>Due</th>
+          <th>Project</th>
+          <th class="complete-col"></th>
+          <th class="delete-col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for task in active_leaf_tasks %}
+        <tr data-task-row="{{ task.id }}" data-status="{{ task.status }}">
+          <td>
+            <a href="/tasks/{{ task.id }}">{{ task.title }}</a>
+            {% if task.parent_title %}
+            <span title="Subtask of &quot;{{ task.parent_title }}&quot;" style="display:block; font-size:11px; color:var(--muted);">↳ {{ task.parent_title }}</span>
+            {% endif %}
+          </td>
+          <td><span class="badge {{ task.status }} status-badge">{{ task.status }}</span></td>
+          <td><span class="badge {{ task.priority }}">{{ task.priority }}</span></td>
+          <td><span class="badge">{{ task.energy_type or '—' }}</span></td>
+          <td>{{ task.due_date or '—' }}</td>
+          <td>{{ task.project_title or '—' }}</td>
+          <td class="complete-col">
+            <button class="js-toggle-complete" data-id="{{ task.id }}" title="Toggle complete">
+              {{ '↩' if task.status == 'done' else '✓' }}
+            </button>
+          </td>
+          <td class="delete-col">
+            <button class="js-delete-task" data-id="{{ task.id }}" title="Delete task">🗑</button>
+          </td>
+        </tr>
+        {% endfor %}
+        <tr data-system="true" id="dash-empty-row" style="display:none;">
+          <td colspan="8" class="empty" style="padding:24px 12px;">No active tasks.</td>
+        </tr>
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">No active tasks.</p>
+    {% endif %}
+  </div>
+
+  <!-- ── tree view (default) ─────────────────────────────────────────────────── -->
+  <div id="dash-view-tree">
+    <div class="card" style="padding:0;">
+      <div id="dash-tree-container"></div>
+    </div>
+  </div>
 </div>
 
 <div class="section">
@@ -114,5 +151,160 @@
     </form>
   </div>
 </div>
+
+<script>
+// ── Active & Inbox: Tree/List toggle (Tree is the default view) ────────────────
+
+function switchDashTab(tab) {
+  const isTree = tab === 'tree';
+  document.getElementById('dash-view-list').style.display = isTree ? 'none' : '';
+  document.getElementById('dash-view-tree').style.display = isTree ? '' : 'none';
+  document.getElementById('dash-tab-list').className = isTree ? 'btn-ghost btn-sm' : 'btn-sm btn-active';
+  document.getElementById('dash-tab-tree').className = isTree ? 'btn-sm btn-active' : 'btn-ghost btn-sm';
+}
+
+// active_tasks is already available from Jinja — pull only the fields the tree needs
+const ALL_TASKS = {{ active_tasks | tojson }};
+
+const taskById   = {};
+const childrenOf = {};
+
+ALL_TASKS.forEach(t => { taskById[t.id] = t; });
+ALL_TASKS.forEach(t => {
+  // null key = root-level tasks. Also treated as root: a task whose parent is
+  // outside this "Active & Inbox" scope (e.g. the parent is done/blocked) —
+  // otherwise it would be unreachable from any rendered root.
+  let pid = t.parent_task_id ?? null;
+  if (pid && !taskById[pid]) pid = null;
+  if (!childrenOf[pid]) childrenOf[pid] = [];
+  childrenOf[pid].push(t);
+});
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// renders one node and all its descendants; visited guards against cycles.
+// children start collapsed — a toggle arrow reveals them, recursively, no
+// matter how deep the tree goes.
+function renderNode(t, depth, visited) {
+  if (visited.has(t.id)) return '';
+  visited.add(t.id);
+
+  const kids    = childrenOf[t.id] || [];
+  const hasKids = kids.length > 0;
+  const indent  = 8 + depth * 20;
+
+  let html = `<div class="tree-node" data-id="${t.id}">`;
+  html += `<div class="tree-row" data-task-row="${t.id}" data-status="${t.status}" style="padding-left:${indent}px">`;
+  html += hasKids
+    ? `<button type="button" class="tree-toggle" aria-expanded="false">▶</button>`
+    : `<span class="tree-toggle-spacer"></span>`;
+  if (depth > 0) html += '<span class="tree-connector">└─ </span>';
+  html += `<a href="/tasks/${t.id}">${escHtml(t.title)}</a>`;
+  html += ` <span class="badge ${t.status} status-badge">${t.status}</span>`;
+  html += ` <span class="badge ${t.priority}">${t.priority}</span>`;
+  html += '<span class="tree-actions">';
+  html += `<button type="button" class="js-toggle-complete" data-id="${t.id}" title="Toggle complete">${t.status === 'done' ? '↩' : '✓'}</button>`;
+  html += `<button type="button" class="js-delete-task" data-id="${t.id}" title="Delete task">🗑</button>`;
+  html += '</span>';
+  html += '</div>';
+
+  if (hasKids) {
+    html += '<div class="tree-children" style="display:none">';
+    for (const child of kids) {
+      html += renderNode(child, depth + 1, visited);
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+const roots = childrenOf[null] || [];
+const dashTreeContainer = document.getElementById('dash-tree-container');
+if (dashTreeContainer) {
+  dashTreeContainer.innerHTML = roots.length === 0
+    ? '<p class="empty" style="padding:12px 16px;">No active tasks.</p>'
+    : roots.map(r => renderNode(r, 0, new Set())).join('');
+}
+
+dashTreeContainer?.addEventListener('click', e => {
+  const toggle = e.target.closest('.tree-toggle');
+  if (toggle) {
+    const node     = toggle.closest('.tree-node');
+    const children = node.querySelector(':scope > .tree-children');
+    if (!children) return;
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    children.style.display = expanded ? 'none' : '';
+    toggle.textContent = expanded ? '▶' : '▼';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    return;
+  }
+
+  const completeBtn = e.target.closest('.js-toggle-complete');
+  if (completeBtn) return toggleComplete(completeBtn, completeBtn.dataset.id);
+
+  const deleteBtn = e.target.closest('.js-delete-task');
+  if (deleteBtn) return deleteTask(deleteBtn, deleteBtn.dataset.id);
+});
+
+// ── complete / delete a task — updates whichever of the List row / Tree row
+// is present for this task (both are rendered up front, just CSS-toggled) ──────
+
+function toggleComplete(btn, taskId) {
+  fetch(`/tasks/${taskId}/complete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(r => r.json())
+  .then(data => {
+    document.querySelectorAll(`[data-task-row="${taskId}"]`).forEach(row => {
+      row.dataset.status = data.status;
+      const badge = row.querySelector('.status-badge');
+      if (badge) { badge.className = `badge ${data.status} status-badge`; badge.textContent = data.status; }
+      const completeBtn = row.querySelector('.js-toggle-complete');
+      if (completeBtn) completeBtn.textContent = data.status === 'done' ? '↩' : '✓';
+    });
+
+    // list view has no filters here, so a newly-completed task always sinks
+    // to the bottom instead of staying in its original position
+    const listRow = document.querySelector(`#dash-task-table tr[data-task-row="${taskId}"]`);
+    if (listRow && data.status === 'done') {
+      const tbody = listRow.closest('tbody');
+      const emptyRow = document.getElementById('dash-empty-row');
+      tbody.insertBefore(listRow, emptyRow);
+    }
+  });
+}
+
+function deleteTask(btn, taskId) {
+  if (!confirm('Delete this task? This cannot be undone.')) return;
+  fetch(`/tasks/${taskId}/delete`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(() => {
+    document.querySelectorAll(`[data-task-row="${taskId}"]`).forEach(row => {
+      (row.closest('.tree-node') || row).remove();
+    });
+
+    const tbody = document.querySelector('#dash-task-table tbody');
+    if (tbody) {
+      const emptyRow = document.getElementById('dash-empty-row');
+      const remaining = tbody.querySelectorAll('tr:not([data-system])').length;
+      if (remaining === 0 && emptyRow) emptyRow.style.display = '';
+    }
+  });
+}
+
+document.getElementById('dash-task-table')?.addEventListener('click', e => {
+  const completeBtn = e.target.closest('.js-toggle-complete');
+  if (completeBtn) return toggleComplete(completeBtn, completeBtn.dataset.id);
+
+  const deleteBtn = e.target.closest('.js-delete-task');
+  if (deleteBtn) return deleteTask(deleteBtn, deleteBtn.dataset.id);
+});
+</script>
 
 {% endblock %}

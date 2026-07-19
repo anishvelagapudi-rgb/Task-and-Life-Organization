@@ -1,4 +1,4 @@
-RAG TEST RESULTS — 2026-07-14 21:21:54
+RAG TEST RESULTS — 2026-07-19 14:14:54
 ========================================================================
 
 
@@ -131,13 +131,11 @@ DETAILED RESULTS
 
 ✓ [PASS]  #16  Passive RAG — AI answers using vault content, cites via separate sources list
   Metric      : Reply has ≥2 QCD terms, sources list has a classes/ path, reply text has no inline path citation
-  Result      : Terms found: ['quark', 'qcd', 'chromodynamics']
+  Result      : Terms found: ['quark', 'qcd', 'gluon', 'confinement', 'chromodynamics']
 Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}, {'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}]
 Inline citation present (should be False): False
 Full reply:
-I know that quantum chromodynamics (QCD) is the theory of the strong nuclear force, and that quarks carry color charge: red, green, or blue. Quarks cannot exist in isolation, and only color-neutral combinations form hadrons. (GK)
-
-Want me to search your vault for anything related?
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force. Quarks are fundamental particles that carry color charge, with three types of color charge: red, green, and blue. Gluons are the force carriers of the strong interaction. Color confinement is a principle of QCD, meaning that quarks cannot exist in isolation and only form color-neutral combinations, which make up hadrons like protons and neutrons.
   Explanation : The QCD note should be retrieved and used, with its source surfaced in the separate `sources` list returned alongside the reply — not named inline in the answer text. Correct on all three counts.
 
 ✓ [PASS]  #17  (GK) fallback — AI labels general knowledge answers
@@ -145,28 +143,45 @@ Want me to search your vault for anything related?
   Result      : (GK) present: True
 Sources: []
 Full reply:
-The boiling point of tungsten is approximately 5930°C. (GK)
+The boiling point of tungsten is 5900 K. (GK)
 
 Want me to search your vault for anything related?
   Explanation : When answering from general knowledge (nothing in vault), the AI must append '(GK)'. Correct — (GK) marker present.
 
-✗ [FAIL]  #18  search_vault tool — active retrieval returns vault content
+✓ [PASS]  #18  search_vault tool — active retrieval returns vault content
   Metric      : Does the AI reply (via search_vault tool) contain terms from the QCD note?
-  Result      : Terms found: []
+  Result      : Terms found: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics']
 Sources: [{'source': 'classes/_test_qcd.md', 'heading': '# Color Confinement'}, {'source': 'classes/_test_qcd.md', 'heading': '# Quarks and Gluons'}]
 Full reply:
+[1] classes/_test_qcd.md § # Color Confinement
+# Color Confinement
 
-  Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries the vector store and returns chunks. No QCD terms in reply — tool may not have been called, or ChromaDB returned empty results.
+…Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+
+Color confinement means quarks cannot exist in isolation — only
+color-neutral combinations form hadrons such as protons and neutrons.
+---
+
+[2] classes/_test_qcd.md § # Quarks and Gluons
+# Quarks and Gluons
+
+Quantum chromodynamics (QCD) is the theory of the strong nuclear force.
+Quarks carry color charge: red, green, or blue.
+Gluons are the force carriers of the strong interaction.
+---
+  Explanation : Asking the AI to 'search my notes' should trigger the search_vault tool call, which queries the vector store and returns chunks. Tool returned vault content — terms: ['confinement', 'quark', 'qcd', 'gluon', 'chromodynamics'].
 
 ✓ [PASS]  #19  create_note tool — AI writes a file to vault/ai_generated/
   Metric      : File created + has reviewed:false + has ai_generated:true in frontmatter
-  Result      : New files: {'ai_generated/rag-pipeline-overview-20260715012256.md'}
+  Result      : New files: {'ai_generated/rag-pipeline-overview-20260719181515.md'}
 reviewed:false present: True
 ai_generated:true present: True
 AI reply:
-I've saved a note titled "RAG Pipeline Overview" about RAG pipelines.
+I've saved your note titled 'RAG Pipeline Overview' to your vault.
   Explanation : The AI should call create_note, which writes a .md file with safety frontmatter. File created correctly with proper flags.
 
 ════════════════════════════════════════════════════════════════════════
-SUMMARY: 18/19 passed   1 failed
+SUMMARY: 19/19 passed   0 failed
 ════════════════════════════════════════════════════════════════════════

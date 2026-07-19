@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, render_template, request, redirect, url_for, make_response
-from db import get_db, init_db, reset_due_recurring_tasks
+from db import get_db, init_db, reset_due_recurring_tasks, local_date_today
 
 from classes.Task import Task
 from classes.Project import Project
@@ -185,6 +185,22 @@ def all_projects():
     return [dict(r) for r in get_db().execute("SELECT * FROM projects ORDER BY title").fetchall()]
 
 
+def leaf_tasks_of(tasks):
+    """Given a flat list of task dicts, returns only the ones with no subtasks of
+    their own — list views show only the edges of the tree; tasks with children
+    are only browsable via a Tree view. Leaves that do have a parent get a
+    parent_title so the list view can still show what they belong to."""
+    task_by_id = {t["id"]: t for t in tasks}
+    parent_ids = {t["parent_task_id"] for t in tasks if t.get("parent_task_id")}
+    leaves = []
+    for t in tasks:
+        if t["id"] in parent_ids:
+            continue
+        parent = task_by_id.get(t.get("parent_task_id"))
+        leaves.append({**t, "parent_title": parent["title"] if parent else None})
+    return leaves
+
+
 def tasks_by_project():
     """All tasks that belong to a project, grouped by project_id. Used to nest a
     project's tasks inside its collapsible row on /projects and /dashboard."""
@@ -222,12 +238,12 @@ def dashboard():
         return redirect(url_for('login'))
     db = get_db()
     _reset_recurring(db)
-    active_tasks = db.execute("""
+    active_tasks = [dict(r) for r in db.execute("""
         SELECT t.*, p.title as project_title
         FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
         WHERE t.status IN ('inbox', 'active') AND t.recurring IS NULL
         ORDER BY t.priority DESC, t.due_date ASC
-    """).fetchall()
+    """).fetchall()]
     projects = [dict(r) for r in db.execute(
         "SELECT * FROM projects WHERE status = 'active' ORDER BY title"
     ).fetchall()]
@@ -235,7 +251,8 @@ def dashboard():
     for p in projects:
         p["tasks"] = grouped.get(p["id"], [])
     return render_template("dashboard.html",
-                           active_tasks=[dict(r) for r in active_tasks],
+                           active_tasks=active_tasks,
+                           active_leaf_tasks=leaf_tasks_of(active_tasks),
                            projects=projects)
 
 
@@ -255,21 +272,9 @@ def get_tasks():
     """).fetchall()
     tasks = [parse_task(dict(r)) for r in rows]
 
-    # list view shows only "edge" tasks (no subtasks of their own) — tasks with
-    # children are only browsable via the Tree view. Leaves that do have a parent
-    # get a parent_title so the list view can still show what they belong to.
-    task_by_id = {t["id"]: t for t in tasks}
-    parent_ids = {t["parent_task_id"] for t in tasks if t.get("parent_task_id")}
-    leaf_tasks = []
-    for t in tasks:
-        if t["id"] in parent_ids:
-            continue
-        parent = task_by_id.get(t.get("parent_task_id"))
-        leaf_tasks.append({**t, "parent_title": parent["title"] if parent else None})
-
     return render_template("tasks.html",
                            tasks=tasks,
-                           leaf_tasks=leaf_tasks,
+                           leaf_tasks=leaf_tasks_of(tasks),
                            projects=all_projects())
 
 
@@ -638,9 +643,10 @@ def chat_new():
     chat_id = str(uuid.uuid4())
     now = _chat_now()
     db = get_db()
+    title = (request.args.get("title") or "New Chat").strip()[:60] or "New Chat"
     db.execute(
         "INSERT INTO chats (id, title, indexed, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
-        (chat_id, "New Chat", now, now),
+        (chat_id, title, now, now),
     )
     db.commit()
     return redirect(url_for('chat_view', chat_id=chat_id))
@@ -715,8 +721,11 @@ def chat_message(chat_id):
         (str(uuid.uuid4()), chat_id, reply, now, json.dumps(sources) if sources else None),
     )
 
-    # Auto-title from the first user message
-    if not history:
+    # Auto-title from the first user message — but never clobber a title the
+    # thread was explicitly created with (e.g. the Training Journal "Ask about
+    # your training" entry point's ?title= on /chat/new), only the "New Chat"
+    # default.
+    if not history and dict(row)["title"] == "New Chat":
         title = content[:60] + ("..." if len(content) > 60 else "")
         db.execute("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?", (title, now, chat_id))
     else:
@@ -1085,6 +1094,251 @@ def vault_file_view(filepath):
         logger.exception("Connection discovery failed for %s", filepath)
 
     return render_template("vault_file.html", filepath=filepath, content=content, connections=connections)
+
+
+# ─── training journal ─────────────────────────────────────────────────────────
+# "Capture first, structure later": raw entries (training_entries) are written
+# once and never edited/deleted from these routes — that's the immutability
+# guarantee. Structured metrics (training_extractions) are pulled out lazily, on
+# read, by services/training/extraction.py — see that module and db.py's
+# reset_due_recurring_tasks for the same lazy-on-read pattern already used
+# elsewhere in this codebase.
+
+def _training_entries_for_date(db, entry_date: str) -> list[dict]:
+    entries = [dict(r) for r in db.execute(
+        "SELECT id, entry_date, content, created_at FROM training_entries "
+        "WHERE entry_date = ? ORDER BY created_at",
+        (entry_date,),
+    ).fetchall()]
+    if not entries:
+        return entries
+    entry_ids = [e["id"] for e in entries]
+    placeholders = ", ".join("?" * len(entry_ids))
+    attachments = [dict(r) for r in db.execute(
+        f"SELECT id, entry_id, storage_key, filename, content_type FROM training_attachments "
+        f"WHERE entry_id IN ({placeholders})",
+        entry_ids,
+    ).fetchall()]
+    by_entry: dict[str, list[dict]] = {}
+    for a in attachments:
+        by_entry.setdefault(a["entry_id"], []).append(a)
+    from services.training import storage as training_storage
+    for e in entries:
+        atts = by_entry.get(e["id"], [])
+        for a in atts:
+            try:
+                a["url"] = training_storage.signed_url(a["storage_key"])
+            except Exception:
+                logger.exception("Failed to sign URL for training attachment %s", a["storage_key"])
+                a["url"] = None
+        e["attachments"] = atts
+    return entries
+
+
+@app.route("/training")
+def training_today():
+    if not get_current_user():
+        return redirect(url_for("login"))
+    today = local_date_today(request.cookies.get("tz"))
+    entries = _training_entries_for_date(get_db(), today)
+    return render_template("training.html", entry_date=today, entries=entries, readonly=False, is_today=True)
+
+
+@app.route("/training/<entry_date>")
+def training_day(entry_date):
+    if not get_current_user():
+        return redirect(url_for("login"))
+    import re as _re
+    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", entry_date):
+        return "Not found", 404
+    today = local_date_today(request.cookies.get("tz"))
+    entries = _training_entries_for_date(get_db(), entry_date)
+    return render_template(
+        "training.html", entry_date=entry_date, entries=entries,
+        readonly=(entry_date != today), is_today=(entry_date == today),
+    )
+
+
+@app.route("/training/entry", methods=["POST"])
+def training_entry():
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+
+    db = get_db()
+    is_multipart = request.content_type and "multipart/form-data" in request.content_type
+    if is_multipart:
+        content = (request.form.get("content") or "").strip()
+        client_tz = request.form.get("timezone")
+        uploaded_files = request.files.getlist("file")
+    else:
+        data = request.get_json(force=True) or {}
+        if data.get("content") is not None and not isinstance(data.get("content"), str):
+            return json.dumps({"error": "content must be a string"}), 400, {"Content-Type": "application/json"}
+        content = (data.get("content") or "").strip()
+        client_tz = data.get("timezone")
+        uploaded_files = []
+
+    if not content and not uploaded_files:
+        return json.dumps({"error": "content or a file is required"}), 400, {"Content-Type": "application/json"}
+
+    entry_date = local_date_today(client_tz)
+    now = datetime.now(timezone.utc).isoformat()
+    entry_id = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO training_entries (id, entry_date, content, processed, created_at) "
+        "VALUES (?, ?, ?, 0, ?)",
+        (entry_id, entry_date, content, now),
+    )
+
+    from services.training import storage as training_storage
+    saved_attachments = []
+    for f in uploaded_files:
+        if not f or not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".heic", ".pdf"):
+            continue  # Phase 1: images + PDFs only, per the plan
+        key = f"{entry_date}/{entry_id}/{uuid.uuid4()}{ext}"
+        content_type = f.mimetype or "application/octet-stream"
+        training_storage.upload(key, f.read(), content_type)
+        att_id = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO training_attachments (id, entry_id, storage_key, filename, content_type, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (att_id, entry_id, key, f.filename, content_type, now),
+        )
+        saved_attachments.append({"filename": f.filename})
+
+    db.commit()
+
+    return json.dumps({
+        "id": entry_id, "entry_date": entry_date, "content": content,
+        "created_at": now, "attachments": saved_attachments,
+    }), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/training/dashboard")
+def training_dashboard():
+    if not get_current_user():
+        return redirect(url_for("login"))
+    db = get_db()
+
+    from services.training.extraction import extract_pending
+    try:
+        processed_count = extract_pending(db, _ai_service)
+    except Exception:
+        logger.exception("Training journal extraction failed on dashboard load")
+        processed_count = 0
+
+    from services.training import query as training_query
+    from services.training import insights as training_insights
+
+    today = local_date_today(request.cookies.get("tz"))
+    try:
+        insights = training_insights.compute_insights(db, today=today)
+    except Exception:
+        logger.exception("Training journal insights computation failed")
+        insights = []
+
+    return render_template(
+        "training_dashboard.html",
+        processed_count=processed_count,
+        weight_points=training_query.weight_trend(db),
+        mileage_points=training_query.weekly_mileage(db),
+        one_rm_by_exercise=training_query.one_rm_by_exercise(db),
+        other_rows=training_query.other_extractions(db),
+        insights=insights,
+    )
+
+
+@app.route("/training/chart/<metric_type>")
+def training_chart(metric_type):
+    if not get_current_user():
+        return redirect(url_for("login"))
+    db = get_db()
+    from services.training import query as training_query
+
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+
+    if metric_type == "weight":
+        points, kind = training_query.weight_trend(db, date_from, date_to), "weight"
+    elif metric_type == "run":
+        points, kind = training_query.weekly_mileage(db, date_from, date_to), "mileage"
+    elif metric_type == "workout_set":
+        points, kind = training_query.one_rm_by_exercise(db, date_from, date_to), "one_rm"
+    else:
+        points, kind = training_query.metric_series(db, metric_type, date_from, date_to), "generic"
+
+    return render_template("training_chart.html", metric_type=metric_type, kind=kind, points=points)
+
+
+@app.route("/training/entry/<entry_id>/delete", methods=["POST"])
+def training_entry_delete(entry_id):
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    db = get_db()
+
+    row = db.execute("SELECT id, entry_date FROM training_entries WHERE id = ?", (entry_id,)).fetchone()
+    if row is None:
+        return json.dumps({"error": "Not found"}), 404, {"Content-Type": "application/json"}
+    # Only today's entries are deletable — matches training.html only rendering
+    # the delete affordance on the today view, not the read-only past-day view.
+    today = local_date_today(request.cookies.get("tz"))
+    if row["entry_date"] != today:
+        return json.dumps({"error": "Only today's entries can be deleted"}), 400, {"Content-Type": "application/json"}
+
+    from services.training import storage as training_storage
+    attachments = db.execute(
+        "SELECT storage_key FROM training_attachments WHERE entry_id = ?", (entry_id,)
+    ).fetchall()
+    for a in attachments:
+        try:
+            training_storage.delete(a["storage_key"])
+        except Exception:
+            logger.exception("Failed to delete training attachment %s from storage", a["storage_key"])
+
+    db.execute("DELETE FROM training_attachments WHERE entry_id = ?", (entry_id,))
+    db.execute("DELETE FROM training_extractions WHERE source_entry_id = ?", (entry_id,))
+    db.execute("DELETE FROM training_entries WHERE id = ?", (entry_id,))
+    db.commit()
+
+    return json.dumps({"success": True}), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/training/entry/<entry_id>/edit", methods=["POST"])
+def training_entry_edit(entry_id):
+    if not get_current_user():
+        return json.dumps({"error": "Unauthorized"}), 401, {"Content-Type": "application/json"}
+    db = get_db()
+
+    row = db.execute("SELECT id, entry_date FROM training_entries WHERE id = ?", (entry_id,)).fetchone()
+    if row is None:
+        return json.dumps({"error": "Not found"}), 404, {"Content-Type": "application/json"}
+    # Only today's entries are editable — same restriction and rationale as delete.
+    today = local_date_today(request.cookies.get("tz"))
+    if row["entry_date"] != today:
+        return json.dumps({"error": "Only today's entries can be edited"}), 400, {"Content-Type": "application/json"}
+
+    data = request.get_json(force=True) or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return json.dumps({"error": "content is required"}), 400, {"Content-Type": "application/json"}
+
+    db.execute("UPDATE training_entries SET content = ?, processed = 0 WHERE id = ?", (content, entry_id))
+    # Existing extractions were derived from the old text -- invalidate them via the
+    # superseded flag the schema already carries for exactly this ("reprocessing an
+    # entry never UPDATEs a row, it INSERTs new ones and marks old ones superseded",
+    # per supabase_setup.sql's training_extractions comment). Resetting processed to 0
+    # above means the next /training/dashboard load's lazy extraction picks this entry
+    # up fresh -- same trigger Phase 1 already established, no new scheduling logic.
+    db.execute(
+        "UPDATE training_extractions SET superseded = 1 WHERE source_entry_id = ? AND superseded = 0",
+        (entry_id,),
+    )
+    db.commit()
+
+    return json.dumps({"id": entry_id, "content": content}), 200, {"Content-Type": "application/json"}
 
 
 # ─── calendar ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,81 @@
+{% extends "layout.html" %}
+{% block title %}{{ metric_type }} chart{% endblock %}
+{% block content %}
+
+<style>
+  :root {
+    --chart-1: #3987e5;
+    --chart-2: #008300;
+    --chart-3: #d55181;
+    --chart-4: #c98500;
+    --chart-5: #199e70;
+    --chart-6: #d95926;
+    --chart-7: #9085e9;
+    --chart-8: #e66767;
+  }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    max-width: 720px;
+  }
+  .chart-card h2 { margin-bottom: 8px; }
+  .chart-empty { color: var(--muted); font-size: 13px; padding: 20px 0; }
+
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; }
+  .chart-legend .item { display: flex; align-items: center; gap: 6px; color: var(--text); }
+  .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  svg.chart { width: 100%; height: auto; overflow: visible; }
+  svg.chart text { fill: var(--muted); font-size: 10px; }
+  svg.chart .gridline { stroke: var(--border); stroke-width: 1; }
+  svg.chart .mark-point { cursor: pointer; }
+
+  .table-toggle {
+    background: none; border: none; color: var(--accent); font-size: 12px;
+    cursor: pointer; padding: 0; margin-top: 8px;
+  }
+  table.chart-table { margin-top: 10px; font-size: 12px; }
+  table.chart-table th, table.chart-table td { padding: 4px 8px; }
+
+  #chart-tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text);
+    display: none;
+    z-index: 50;
+  }
+</style>
+
+<h1>{{ metric_type.replace('_', ' ').title() }}</h1>
+<div class="chart-card">
+  <div id="metric-chart"></div>
+</div>
+
+<div id="chart-tooltip"></div>
+
+<script src="{{ url_for('static', filename='training-charts.js') }}"></script>
+<script>
+  const KIND   = {{ kind | tojson }};
+  const POINTS = {{ points | tojson }};
+  const COLORS = TrainingCharts.colors();
+
+  if (KIND === 'weight') {
+    TrainingCharts.renderLineChart('metric-chart', POINTS, 'date', 'value_lbs', COLORS[0], 'lbs', ['date', 'value_lbs']);
+  } else if (KIND === 'mileage') {
+    TrainingCharts.renderBarChart('metric-chart', POINTS, 'week', 'miles', COLORS[0], 'mi', ['week', 'miles']);
+  } else if (KIND === 'one_rm') {
+    TrainingCharts.renderMultiLineChart('metric-chart', POINTS);
+  } else {
+    TrainingCharts.renderLineChart('metric-chart', POINTS, 'date', 'value', COLORS[0], '', ['date', 'value']);
+  }
+</script>
+
+{% endblock %}

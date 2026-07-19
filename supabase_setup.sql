@@ -160,3 +160,56 @@ CREATE INDEX IF NOT EXISTS idx_ai_usage_log_ts ON ai_usage_log (ts);
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('vault', 'vault', false)
 ON CONFLICT (id) DO NOTHING;
+
+-- Training Journal (Phase 1) -------------------------------------------------
+-- Immutable raw log (training_entries) + append-only structured extractions
+-- (training_extractions) pulled from it on demand. See README's "Training
+-- Journal" section for the full design rationale.
+
+CREATE TABLE IF NOT EXISTS training_entries (
+    id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    entry_date  TEXT NOT NULL,   -- local calendar date (YYYY-MM-DD), resolved via the client's tz cookie
+    content     TEXT NOT NULL,   -- raw text, verbatim, never edited after insert
+    processed   INTEGER NOT NULL DEFAULT 0,  -- 0 = pending extraction, flips to 1 once processed
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_training_entries_date ON training_entries (entry_date);
+CREATE INDEX IF NOT EXISTS idx_training_entries_processed ON training_entries (processed) WHERE processed = 0;
+
+CREATE TABLE IF NOT EXISTS training_attachments (
+    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    entry_id     TEXT NOT NULL,
+    storage_key  TEXT NOT NULL,   -- key in the 'training-journal' Storage bucket
+    filename     TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_training_attachments_entry ON training_attachments (entry_id);
+
+-- Append-only: reprocessing an entry never UPDATEs a row here, it INSERTs new
+-- ones (see services/training/extraction.py) so results stay fully
+-- reproducible/re-runnable against a better model later, per the spec.
+-- metric_type + a flexible JSON `data` payload (same convention as this
+-- codebase's existing tags/dependencies/task_notes JSON-TEXT columns) instead
+-- of one rigid table per metric, so new metric types don't need schema churn.
+CREATE TABLE IF NOT EXISTS training_extractions (
+    id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    source_entry_id   TEXT NOT NULL,
+    entry_date        TEXT NOT NULL,   -- denormalized from the source entry for cheap date-range queries
+    metric_type       TEXT NOT NULL,   -- weight | body_measurement | nutrition | sleep | resting_hr |
+                                        -- run | workout_set | soreness_injury | mood_energy | recovery | steps | note
+    data              TEXT NOT NULL,   -- JSON object, shape depends on metric_type
+    confidence        REAL NOT NULL,
+    extraction_model  TEXT NOT NULL,
+    extracted_at      TEXT NOT NULL,
+    superseded        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_training_extractions_lookup
+    ON training_extractions (metric_type, entry_date) WHERE superseded = 0;
+
+-- Private bucket for training-journal attachments (photos, PDFs, screenshots).
+-- Separate from the 'vault' bucket deliberately: vault uploads trigger RAG
+-- indexing side effects that attachments must never go through.
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('training-journal', 'training-journal', false)
+ON CONFLICT (id) DO NOTHING;

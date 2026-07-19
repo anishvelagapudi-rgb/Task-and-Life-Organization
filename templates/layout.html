@@ -292,9 +292,10 @@
     tr:hover .delete-col button { opacity: 1; }
 
     /* subtask tree */
-    .tree-row { padding: 8px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .tree-row { padding: 8px 8px; border-bottom: 1px solid var(--border); font-size: 13px; overflow: hidden; }
     .tree-row:last-child { border-bottom: none; }
     .tree-row.tree-current { background: rgba(74, 158, 255, 0.07); }
+    .tree-row[data-status="done"] { background: rgba(74, 255, 145, 0.18); }
     .tree-connector { color: var(--muted); margin-right: 4px; }
     .tree-toggle {
       background: none; border: none; cursor: pointer; padding: 0;
@@ -303,6 +304,23 @@
     }
     .tree-toggle-spacer { display: inline-block; width: 14px; }
     .btn-active { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+
+    /* complete/delete buttons on a tree row — same hover-reveal pattern as the list view */
+    .tree-actions { float: right; display: flex; gap: 6px; }
+    .tree-actions button {
+      opacity: 0;
+      transition: opacity 0.1s;
+      background: transparent;
+      padding: 2px 6px;
+      font-size: 11px;
+      border-radius: 3px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .tree-row:hover .tree-actions button { opacity: 1; }
+    .tree-actions .js-toggle-complete { border: 1px solid var(--success); color: var(--success); }
+    .tree-row[data-status="done"] .tree-actions .js-toggle-complete { border-color: var(--warn); color: var(--warn); }
+    .tree-actions .js-delete-task { border: 1px solid var(--danger, #e05252); color: var(--danger, #e05252); }
 
     /* recurring tasks modal */
     .modal-backdrop {
@@ -332,6 +350,7 @@
     <a href="/tasks">Tasks</a>
     <a href="/projects">Projects</a>
     <a href="/calendar">Calendar</a>
+    <a href="/training">Journal</a>
     <a href="/chat">Chat</a>
     <a href="/vault">Vault</a>
     <div class="capture-bar">

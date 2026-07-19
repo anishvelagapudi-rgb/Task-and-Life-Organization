@@ -83,6 +83,7 @@ Three layers:
 | Embeddings | `gemini-embedding-001` (Google), 3072-dim |
 | Calendar sync | Google Calendar API (read-only) + `icalendar` for one-way ICS import |
 | Date parsing | `dateparser` (deterministic NL date parsing, no AI) |
+| Spreadsheet export | `openpyxl` (Training Journal's `export_training_data` tool, `.xlsx` only — CSV needs no library) |
 
 **Migrated from SQLite/ChromaDB/local vault files to Supabase (2026-07-06)**, driven
 by the decision to deploy on Vercel: serverless functions have no persistent local
@@ -118,7 +119,14 @@ app's scale (a personal vault, low thousands of chunks at most).
   against the Supabase project) — `init_db()` no longer creates tables, it just wires
   up per-request connection cleanup (`app.teardown_appcontext(close_db)`). Also holds
   `enforce_recurring_invariant()` (shared between the REST API and the AI tool
-  executor) and `reset_due_recurring_tasks()` (see Data Model below).
+  executor) and `reset_due_recurring_tasks()` (see Data Model below). `get_db()`
+  also now checks the cached connection's `.closed` state and reconnects if it's
+  gone stale, not just whether one exists yet — Supabase's pooled connection
+  (Supavisor) can silently drop an idle connection mid-request during a slow
+  multi-round Gemini tool-calling chat (surfaced by a slow Training Journal
+  data query, 2026-07-19); previously this cascaded into an unhandled 500 even
+  on the `explain_error()` fallback path that's specifically supposed to
+  handle an error gracefully.
 - `classes/Task.py`, `classes/Project.py` — plain Python objects with a
   `db_push(conn)` method that does its own INSERT-or-UPDATE (a lightweight
   hand-rolled ORM substitute), used by the HTML routes. `db_push` builds a single
@@ -249,6 +257,32 @@ as a cache/log, not a rigorously-designed invalidation strategy. Rows for a dele
 vault file are best-effort cleaned up on vault delete/move, mirroring how the vector
 store's index is already cleaned up on delete.
 
+**`training_entries`** — the Training Journal's raw, immutable-by-default log.
+`id`, `entry_date` (local calendar date, `YYYY-MM-DD`, resolved via the same
+`tz`-cookie mechanism recurring tasks use), `content` (raw text, never edited
+except through the explicit edit route below), `processed` (0/1, drives lazy
+extraction — see "Training Journal" section below), `created_at`.
+
+**`training_attachments`** — images/PDFs attached to a `training_entries` row
+(Phase 1 scope only). `storage_key` points into a dedicated `training-journal`
+Supabase Storage bucket, deliberately separate from the `vault` bucket —
+vault uploads trigger RAG indexing side effects attachments must never go
+through.
+
+**`training_extractions`** — append-only structured data an LLM extracts from
+`training_entries.content` lazily (on read, not on every message — see
+Training Journal section below). `source_entry_id`, `entry_date`
+(denormalized for cheap date-range queries), `metric_type` (one of `weight`,
+`body_measurement`, `nutrition`, `sleep`, `resting_hr`, `run`, `workout_set`,
+`soreness_injury`, `mood_energy`, `recovery`, `steps`, `note`), `data` (JSON,
+shape depends on `metric_type` — same JSON-TEXT-column convention as
+`tags`/`dependencies`/`task_notes` above, so new metric types don't need
+schema churn), `confidence`, `extraction_model`, `extracted_at`, `superseded`
+(0/1 — reprocessing an entry never `UPDATE`s a row here, it `INSERT`s new ones
+and flags the old ones superseded, so results stay reproducible against a
+better model later; also reused, new as of the edit-in-place feature, to
+invalidate extractions after a user edits an entry's text).
+
 **No foreign key constraints anywhere** (`project_id`, `parent_task_id`,
 `calendar_id`, etc. are plain `TEXT` columns, not `REFERENCES`) — a deliberate
 carry-over from SQLite, not an oversight. SQLite never enforced the `REFERENCES`
@@ -266,6 +300,13 @@ that route's behavior is intentionally changed first.
 - `provider.py` — `AIProvider` interface (`chat`, `chat_with_tools`); swap backends
   by implementing it. `gemini_provider.py` (primary, Gemini 2.5 Flash Lite, full
   tool-calling) and `groq_provider.py` (implemented, not actively used).
+  `gemini_provider.py`'s `chat_with_tools` also degrades to an empty response
+  (`"", []`) instead of raising `AttributeError` when
+  `response.candidates[0].content` is `None` — can happen on a non-`STOP`
+  finish reason (safety/recitation/malformed-function-call, or the same
+  "0 output tokens" quirk documented below) — callers already treat "no tool
+  calls, no text" as a valid empty response, so this just stops it from
+  crashing the call outright (found 2026-07-19 during Training Journal work).
 - `service.py` (~1100+ lines) — the core: system prompt, the agentic tool-calling
   loop (up to 5 rounds per message), all calendar-date-resolution logic, task/
   project/calendar context injected on every call. As of 2026-07-06, the injected
@@ -279,13 +320,18 @@ that route's behavior is intentionally changed first.
 - **Tools the AI can use:** `create_task`, `update_task`, `delete_task`,
   `delete_tasks_matching`, `create_project`, `update_project`, `delete_project`,
   `read_document`, `search_vault`, `create_note`, `list_events`, `create_event`,
-  `update_event`, `delete_event`, `find_connections`. Any new AI tool
+  `update_event`, `delete_event`, `find_connections`, `query_training_data`,
+  `export_training_data`, `graph_training_metric` (the last three read/export/
+  chart the Training Journal — see that section below). Any new AI tool
   that returns vault/note content should follow the same single-tool-call shortcut
-  pattern as `search_vault`/`read_document`/`list_events`/`find_connections` (bypass
+  pattern as `search_vault`/`read_document`/`list_events`/`find_connections`/
+  `query_training_data` (bypass
   the tool-response round-trip, inject results via a fresh plain-chat call instead of
   trusting the tool-response round-trip) — this works around a documented Gemini bug
   where it occasionally emits 0 output tokens on the round right after a real tool
-  call.
+  call. `query_training_data`'s shortcut needed one extra fix on top of the
+  pattern — see "Training-journal tool shortcut" under the NVIDIA/Gemma
+  findings below.
 - `AIService.chat()` returns `(reply_text, sources)`, not a bare string — every call
   site (`app.py`, `ai_routes.py`, `rag_test.py`) unpacks the tuple. `sources` feeds
   the chat UI's citation chips and is populated even by the single-tool shortcut
@@ -819,6 +865,34 @@ optional one — both providers are constructed eagerly at import time in `app.p
 same as every other required secret in this codebase (no fallback if it's
 missing, matching how `GEMINI_API_KEY`/`FLASK_SECRET_KEY`/etc. already behave).
 
+### Training-journal tool shortcut — a fifth instance of the reasoning-provider quirk (2026-07-19)
+
+`query_training_data` got the same single-tool-call shortcut treatment as
+`search_vault`/`list_events`/`read_document`/`find_connections` (see "Tools the
+AI can use" above) — but its synthesis call needed an extra fix the other four
+didn't. The shortcut's tools-free synthesis call runs on `reasoning_provider`
+(NVIDIA/Gemma), but was still being fed the full system prompt, including the
+"TRAINING JOURNAL DATA: Use query_training_data to..." instruction block — a
+paragraph that names real tools by name and tells the model to "use" them, sent
+into a call with no tools actually attached. Result: the model reliably (6/6 in
+live testing) hallucinated a text tool-call instead of writing a plain-language
+answer, tripping `nvidia_provider.py`'s tool-call-hallucination guard (see
+above) and returning its honest-failure fallback text instead of a real answer.
+Fixed with `_SYSTEM_PROMPT_NO_TRAINING_TOOLS`, a derived system-prompt variant
+with that instruction block sliced off, used only for this one shortcut's
+synthesis call (plus one bounded retry if the fallback text still comes back,
+same pattern as `extraction.py`'s retry — see Training Journal section below).
+Untested whether the same failure mode reaches the other four shortcuts. They
+actually carry the identical phrasing pattern already — "Use search_vault
+when...", "Use read_document to...", "Use find_connections when...", "Use
+list_events to..." all appear in the base prompt the same way
+`query_training_data`'s instruction did — so this fix was verified for
+`query_training_data` specifically (6/6 repro, then 4/4 clean after the fix)
+but not proven to be unnecessary for the other four; they just haven't been
+live-tested closely enough yet to know their failure rate. If one of them
+turns out to need it too, the same `_SYSTEM_PROMPT_NO_TRAINING_TOOLS`-style
+strip-and-reuse approach should generalize.
+
 ---
 
 ## RAG Pipeline (`services/rag/`) — How It Works and Why
@@ -1113,6 +1187,135 @@ anymore, just a Storage key).
 
 ---
 
+## Training Journal (`services/training/`)
+
+A "capture first, structure later" journal — a chat-style daily log of freeform
+text (workouts, weight, runs, sleep, soreness, mood, whatever) — separate from
+both the task execution layer and the vault/RAG knowledge layer, though it
+shares the AI chat as its query surface (see below). Not yet committed to git
+— built and verified across the last two sessions, currently only in the
+working tree alongside the rest of the uncommitted work described in
+"Working-Tree State" below.
+
+### Design: immutable capture, lazy extraction
+
+`training_entries` rows are raw text, written once and not touched again
+except through an explicit user-initiated edit (see below) — capture is meant
+to be as frictionless as typing a sentence and hitting enter, with zero
+structuring cost paid at write time. Structured metrics
+(`training_extractions`) are pulled out of that raw text lazily, on read, not
+on every write: `extract_pending()` (`services/training/extraction.py`) runs
+from the `/training/dashboard` route, exactly the same **lazy-on-read**
+pattern `db.py`'s `reset_due_recurring_tasks()` already established for
+recurring tasks — no scheduler, no background worker, just "do the deferred
+work the next time someone actually looks." It selects up to 30
+`processed = 0` entries, sends their raw text to Gemini in one batch asking it
+to extract zero-or-more structured metric rows per entry, validates every
+returned item before writing (unknown `source_entry_id`, invalid
+`metric_type`, non-object `data`, or an out-of-range `confidence` gets
+dropped, never trusted blindly — same discipline as `db.py`'s
+`enforce_parent_exists`), and marks the whole batch `processed = 1`
+regardless of whether anything was actually extracted from it (so a
+genuinely-empty entry doesn't get retried forever). One bounded retry (never
+more) covers a real, observed case: Gemini occasionally returns 0 extraction
+items for a clearly-extractable batch (same 0-output-token-family quirk
+documented throughout the AI Layer section) — indistinguishable from
+"genuinely nothing extractable" without a retry. A real API/network failure
+instead leaves the whole batch unprocessed so the next dashboard load retries
+it, rather than marking entries processed and silently losing their content.
+
+### Edit-in-place reuses the `superseded` flag, not a new mechanism
+
+`training_extractions` was already designed append-only — reprocessing an
+entry never `UPDATE`s a row, it `INSERT`s a new one and flags old ones
+`superseded = 1` (so results stay reproducible against a better extraction
+model later). The edit-in-place feature (`POST
+/training/entry/<id>/edit`, today's entries only) reuses that exact same flag
+for a second purpose: editing an entry's text sets `processed = 0` on it
+(so the next dashboard load's lazy extraction re-runs) and immediately marks
+its *existing* extractions `superseded = 1` — so every read path
+(`query.py`'s aggregations, the dashboard, the AI's `query_training_data`
+tool) automatically stops surfacing the stale pre-edit value the instant the
+edit is saved, without needing to know anything changed. `POST
+/training/entry/<id>/delete` is a hard delete (no soft-delete/audit row) —
+also today's entries only, matching what `training.html` renders the
+edit/delete affordances for; past days are read-only.
+
+### Module layout (`services/training/`)
+
+- `storage.py` — thin wrapper around a dedicated `training-journal` Supabase
+  Storage bucket (`upload`/`download`/`delete`/`signed_url`), separate from
+  the vault's `storage.py`/bucket on purpose: vault uploads trigger RAG
+  indexing side effects attachments must never go through. Private bucket,
+  so templates render attachments via a short-lived `signed_url()`, never a
+  public path.
+- `extraction.py` — `extract_pending()`, described above.
+- `query.py` — the single shared read/aggregation layer (`query_rows`,
+  `export_rows`, `weight_trend`, `weekly_mileage`, `one_rm_by_exercise`,
+  `metric_series`) used by the dashboard route, the single-metric chart
+  route, *and* all three AI tools below — one implementation, not three
+  independently-drifting ones. Every function is a pure function of
+  `(db, filters)` with no Flask/AI-provider imports, so it's equally callable
+  from a route or a tool executor. `one_rm_by_exercise` uses the Epley
+  formula; `query_rows` returns real rows (joined back to the original entry
+  text) rather than a pre-aggregated answer — callers, including the AI, do
+  their own counting/summing/filtering over them.
+- `insights.py` — `compute_insights()`, see below.
+
+### Routes (`app.py`)
+
+`/training` (today's log, capture form), `/training/<date>` (read-only past
+days), `POST /training/entry` (capture; multipart when attachments are
+included), `POST /training/entry/<id>/edit` / `POST
+/training/entry/<id>/delete` (today's entries only, see above),
+`/training/dashboard` (triggers lazy extraction + insights, renders
+weight/mileage/1RM charts), `/training/chart/<metric_type>` (single-metric
+chart page; shared client-side rendering lives in
+`static/training-charts.js`, used by both the dashboard and this page).
+
+### Insights: deterministic, no LLM, no judgment language
+
+`compute_insights()` (`insights.py`) is plain Python over `training_extractions`
+— no LLM call at all, five threshold-gated detectors (PR, weight trend,
+weekly-mileage trend, resting-HR streak, soreness/injury frequency). Each
+detector states only a number and a comparison ("Weight down 2.3 lbs over the
+last 2 weeks", "Resting heart rate has risen 3 mornings in a row") — no
+encouragement/warning language ("great", "concerning", "you should") is
+allowed in a detector's output, matching this codebase's existing stance
+against the AI editorializing over the user's own data.
+
+**A "logging streak" detector (consecutive days with an entry) was
+deliberately not built.** Flagged during design as measuring app-usage
+frequency rather than an actual training signal — the textbook shape of a
+dark pattern regardless of how it's threshold-gated — and this project's own
+stated philosophy (friction reduction, success measured as "needs the tool
+less over time," not "opens it every day forever" — see "What This Is" above)
+already argues against ever building one.
+
+### AI integration — three tools, same chat, no new backend system
+
+`services/ai/service.py` exposes `query_training_data`, `export_training_data`,
+and `graph_training_metric` from the normal `/chat` assistant (see "Tools the
+AI can use" under AI Layer above for the full list, and "Training-journal tool
+shortcut" further down that section for a Gemini/NVIDIA-specific fix this
+integration needed). `query_training_data` returns real rows for the model to
+reason over — no pre-aggregation, same "dump the real data, let the model
+reason" pattern the task list already uses. `export_training_data` writes a
+CSV/Excel file (via `openpyxl` for `.xlsx`) to the `training-journal` bucket
+and returns a signed URL; `graph_training_metric` returns a link to
+`/training/chart/<type>`. The system prompt requires the model to include
+either tool's returned `url` verbatim in its reply and never fabricate one.
+
+There's also a dedicated entry point — an "Ask about your training" button on
+the Training Journal page that `POST`s to the existing `/chat/new` route with
+a new optional `?title=` query param, landing in a normal, pre-titled chat
+thread with the same tools available. Not a separate chat system; `chat_new`'s
+auto-titling logic (which otherwise renames a thread from its first message)
+was taught to skip a thread that wasn't created with the "New Chat" default
+title, so this pre-set title isn't immediately clobbered.
+
+---
+
 ## Web UI (Jinja2 templates)
 
 - `/dashboard` — active tasks + active projects overview (recurring tasks excluded)
@@ -1127,6 +1330,10 @@ anymore, just a Storage key).
   Google Calendar events; calendar picker; local event CRUD, GCal read-only
 - `/vault`, `/vault/file/<path>` — vault browser and viewer, with the
   connection-engine "Related" aside
+- `/training` — today's Training Journal log (capture form); `/training/<date>`
+  — read-only past days; `/training/dashboard` — charts + deterministic
+  insights; `/training/chart/<metric_type>` — single-metric chart (see
+  "Training Journal" above)
 - `/login` — Google OAuth entry point
 
 A sitewide fast-capture bar (`POST /capture`, cookie-authed) lives as a single
@@ -1194,6 +1401,11 @@ during the Supabase migration was ad hoc (Flask's `test_client()` with a fake
 delete end to end, plus direct Postgres/Storage queries to confirm no orphaned
 rows/objects were left behind), not part of either permanent suite. This is an open
 regression-protection gap, not something either harness was designed to cover.
+The Training Journal (see that section above) is entirely in this same
+uncovered category — its routes are cookie-authed/HTML-facing like the rest of
+this list, and its three AI tools (`query_training_data`/
+`export_training_data`/`graph_training_metric`) have no equivalent of
+`rag_test.py`'s automated coverage yet either.
 
 ---
 
@@ -1289,6 +1501,18 @@ Two rounds of uncommitted work now sit in the local tree, neither committed
 `supabase_setup.sql`, `vercel.json`). No destructive git operations have been run.
 Check `git status`/`git diff` before assuming `HEAD` reflects current functionality
 — it doesn't; `HEAD` is still on plain SQLite/ChromaDB/local-disk.
+
+A third, separate body of uncommitted work also now sits in the tree (built
+across two sessions after the above, not yet folded into this section's own
+"as of 2026-07-06" snapshot): the Training Journal feature — the new
+`services/training/` package, its three templates, `static/training-charts.js`,
+the `training_entries`/`training_attachments`/`training_extractions` tables in
+`supabase_setup.sql`, the training routes in `app.py`, the three new AI tools
+and `_SYSTEM_PROMPT_NO_TRAINING_TOOLS` in `services/ai/service.py`, and the two
+general bugfixes (`db.py`'s stale-connection reconnect, `gemini_provider.py`'s
+`None`-content guard) it surfaced. See the "Training Journal" section above for
+the full picture — like the other two rounds here, deliberately not yet
+committed.
 
 **Not yet done, flagged explicitly:** the 2026-07-04 batch has not been exercised in
 a real browser by an AI session (verification used `py_compile`, direct Python

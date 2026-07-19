@@ -190,7 +190,20 @@ class GeminiProvider(AIProvider):
 
         text_parts = []
         tool_calls = []
-        for idx, part in enumerate(response.candidates[0].content.parts or []):
+        # response.candidates[0].content can be None on a finish_reason other than
+        # STOP (SAFETY/RECITATION/MALFORMED_FUNCTION_CALL/etc, or the same "0 output
+        # tokens" quirk documented elsewhere in this codebase for the round right
+        # after a tool call) -- callers already treat "no tool calls, no text" as a
+        # valid empty response (see chat()'s _synthesize_tool_confirmation fallback),
+        # so degrade to that instead of an AttributeError crashing the whole call.
+        content = response.candidates[0].content
+        if content is None:
+            logger.warning(
+                "Gemini chat_with_tools returned no content (finish_reason=%s)",
+                getattr(response.candidates[0], "finish_reason", None),
+            )
+            return "", []
+        for idx, part in enumerate(content.parts or []):
             if part.function_call and part.function_call.name:
                 tool_calls.append({
                     "call_id": f"call_{idx}",

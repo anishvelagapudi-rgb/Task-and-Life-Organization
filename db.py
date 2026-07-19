@@ -52,9 +52,24 @@ class _PGConnection:
     def close(self):
         self._conn.close()
 
+    @property
+    def closed(self) -> bool:
+        return bool(self._conn.closed)
+
 
 def get_db():
-    if "db" not in g:
+    """A single chat() call can hold this connection open for tens of seconds
+    across several sequential Gemini round-trips (multi-round tool-calling) --
+    long enough for Supabase's pooled connection (Supavisor, DATABASE_URL) to
+    drop it as idle mid-request. Reconnecting here when the cached connection
+    has gone bad means every *subsequent* query in the same request (including
+    the explain_error() fallback path that's specifically supposed to handle
+    an error gracefully) gets a working connection instead of cascading into a
+    second, unhandled failure on top of the first. Surfaced empirically: a
+    slow multi-round training-data chat query outlived the pooled connection,
+    and the fallback error handler tried to reuse the same dead connection and
+    also raised, turning a soft failure into an unhandled 500."""
+    if "db" not in g or g.db.closed:
         g.db = _PGConnection(psycopg2.connect(os.environ["DATABASE_URL"]))
     return g.db
 
@@ -172,6 +187,17 @@ def _resolve_tz(client_tz: str | None):
             # used for client_tz handling in services/ai/service.py's chat().
             pass
     return timezone.utc
+
+
+def local_date_today(client_tz: str | None = None) -> str:
+    """Today's calendar date (YYYY-MM-DD) in the client's local timezone (the `tz`
+    cookie set by layout.html), falling back to UTC. Public wrapper around
+    _resolve_tz for callers outside this module (e.g. the Training Journal routes
+    in app.py, which need to stamp entries with the user's local day, not UTC's) —
+    same client_tz-cookie pattern already used by reset_due_recurring_tasks below."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).astimezone(_resolve_tz(client_tz)).date().isoformat()
 
 
 def reset_due_recurring_tasks(db, client_tz: str | None = None) -> None:
